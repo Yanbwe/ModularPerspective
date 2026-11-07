@@ -77,6 +77,18 @@ public record CameraDirective(
         return channels.contains(channel);
     }
 
+    /** 复制一条只替换目标值的指令（其他字段不变，如 SUGGEST 顶掉某个锁位时使用，§5.3）。 */
+    public CameraDirective withTarget(CameraTarget newTarget) {
+        return new CameraDirective(id, owner, seq, priority, enforcement, channels, newTarget,
+                fadeInTicks, fadeOutTicks, easing, durationTicks, requiresAck, keepOnDeath, startTick);
+    }
+
+    /** 复制一条只替换 enforcement 的指令（客户端 SUGGEST_ONLY 策略把 REQUIRE 降级时使用，§5.4）。 */
+    public CameraDirective withEnforcement(Enforcement newEnforcement) {
+        return new CameraDirective(id, owner, seq, priority, newEnforcement, channels, target,
+                fadeInTicks, fadeOutTicks, easing, durationTicks, requiresAck, keepOnDeath, startTick);
+    }
+
     /** 已到期（{@code durationTicks > 0} 且存活 tick 数达到 duration；{@code < 0} 永不）。 */
     public boolean expired(long tick) {
         return durationTicks > 0 && tick - startTick >= durationTicks;

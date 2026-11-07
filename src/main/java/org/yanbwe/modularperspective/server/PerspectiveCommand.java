@@ -1,6 +1,7 @@
 package org.yanbwe.modularperspective.server;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.context.CommandContext;
@@ -22,6 +23,7 @@ import org.yanbwe.modularperspective.api.camera.CameraTarget;
 import org.yanbwe.modularperspective.api.camera.Easing;
 import org.yanbwe.modularperspective.api.camera.Enforcement;
 import org.yanbwe.modularperspective.api.camera.InputLock;
+import org.yanbwe.modularperspective.api.camera.PerspectivePolicy;
 import org.yanbwe.modularperspective.api.camera.Position3;
 import org.yanbwe.modularperspective.api.camera.Projection;
 
@@ -86,6 +88,23 @@ public final class PerspectiveCommand {
                                 .then(lockChoices("zoom"))
                                 .then(lockChoices("move"))
                                 .then(lockChoices("all"))))
+                .then(Commands.literal("policy")
+                        .then(Commands.argument("targets", EntityArgument.players())
+                                .then(policyFlag("allowRequire", 0))
+                                .then(policyFlag("allowSuggest", 1))
+                                .then(policyFlag("allowOrthographic", 2))
+                                .then(Commands.literal("maxDirectives")
+                                        .then(Commands.argument("value", IntegerArgumentType.integer(1, 1024))
+                                                .executes(ctx -> policyNumber(ctx,
+                                                        EntityArgument.getPlayers(ctx, "targets"),
+                                                        IntegerArgumentType.getInteger(ctx, "value"), true))))
+                                .then(Commands.literal("maxDistance")
+                                        .then(Commands.argument("value", DoubleArgumentType.doubleArg(1.0D, 128.0D))
+                                                .executes(ctx -> policyNumber(ctx,
+                                                        EntityArgument.getPlayers(ctx, "targets"),
+                                                        DoubleArgumentType.getDouble(ctx, "value"), false))))
+                                .then(Commands.literal("query")
+                                        .executes(ctx -> policyQuery(ctx, EntityArgument.getPlayers(ctx, "targets"))))))
                 .then(Commands.literal("clear")
                         .then(Commands.argument("targets", EntityArgument.players())
                                 .executes(ctx -> clear(EntityArgument.getPlayers(ctx, "targets")))))
@@ -117,7 +136,7 @@ public final class PerspectiveCommand {
             try {
                 CameraDirective directive = pushTopDown(target, COMMAND_DIRECTIVE_ID, DEFAULT_PRIORITY,
                         Enforcement.SUGGEST, yaw, pitch, DEFAULT_DISTANCE, EnumSet.noneOf(InputLock.class),
-                        duration, false);
+                        duration, false, true);
                 ModularPerspective.LOGGER.info("[perspective] command camera -> {} id={} seq={} duration={}",
                         target.getGameProfile().getName(), directive.id(), directive.seq(), duration);
                 pushed++;
@@ -144,7 +163,7 @@ public final class PerspectiveCommand {
             try {
                 CameraDirective directive = pushTopDown(target, PRESET_DIRECTIVE_ID, PRESET_PRIORITY,
                         Enforcement.SUGGEST, target.getYRot(), 45.0F, DEFAULT_DISTANCE,
-                        EnumSet.of(InputLock.ROTATE, InputLock.ZOOM), duration, false);
+                        EnumSet.of(InputLock.ROTATE, InputLock.ZOOM), duration, false, false);
                 ModularPerspective.LOGGER.info("[perspective] command preset top-down -> {} id={} seq={}",
                         target.getGameProfile().getName(), directive.id(), directive.seq());
                 affected++;
@@ -162,7 +181,7 @@ public final class PerspectiveCommand {
     /** 统一的俯视落位：眼睛沿 forward 退 distance；通道 POSITION/ANGLE/ZOOM/PROJECTION。 */
     private static CameraDirective pushTopDown(ServerPlayer target, String id, int priority, Enforcement enforcement,
                                                 float yaw, float pitch, float distance, EnumSet<InputLock> locks,
-                                                int duration, boolean keepOnDeath) {
+                                                int duration, boolean keepOnDeath, boolean requiresAck) {
         Vec3 eye = target.getEyePosition();
         Vec3 forward = Vec3.directionFromRotation(pitch, yaw);
         Position3 position = new Position3(
@@ -173,7 +192,70 @@ public final class PerspectiveCommand {
                 Projection.ORTHOGRAPHIC, null, locks);
         EnumSet<CameraChannel> channels = EnumSet.of(CameraChannel.POSITION, CameraChannel.ANGLE,
                 CameraChannel.ZOOM, CameraChannel.PROJECTION);
-        return PerspectiveServer.push(target, id, priority, enforcement, channels, value, duration, false, keepOnDeath);
+        if (!locks.isEmpty()) {
+            // §5.3：锁位只有挂到 INPUT_LOCK 通道上才会进入仲裁并集，preset 命令必须显式带上该通道。
+            channels.add(CameraChannel.INPUT_LOCK);
+        }
+        return PerspectiveServer.push(target, id, priority, enforcement, channels, value, duration, requiresAck, keepOnDeath);
+    }
+
+    // ------------------------------------------------------------------ policy
+
+    /** {@code /perspective policy <targets> <flag> on|off}。 */
+    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> policyFlag(String name, int flag) {
+        return Commands.literal(name)
+                .then(Commands.literal("on")
+                        .executes(ctx -> policyFlag(ctx, EntityArgument.getPlayers(ctx, "targets"), flag, true)))
+                .then(Commands.literal("off")
+                        .executes(ctx -> policyFlag(ctx, EntityArgument.getPlayers(ctx, "targets"), flag, false)));
+    }
+
+    private static int policyFlag(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets,
+                                  int flag, boolean value) {
+        int changed = 0;
+        for (ServerPlayer target : targets) {
+            PerspectivePolicy policy = PerspectiveServer.policy(target);
+            PerspectivePolicy updated = switch (flag) {
+                case 0 -> new PerspectivePolicy(value, policy.allowSuggest(), policy.maxDirectives(),
+                        policy.maxDistance(), policy.allowOrthographic());
+                case 1 -> new PerspectivePolicy(policy.allowRequire(), value, policy.maxDirectives(),
+                        policy.maxDistance(), policy.allowOrthographic());
+                default -> new PerspectivePolicy(policy.allowRequire(), policy.allowSuggest(),
+                        policy.maxDirectives(), policy.maxDistance(), value);
+            };
+            PerspectiveServer.setPolicy(target, updated);
+            changed++;
+        }
+        int count = changed;
+        ctx.getSource().sendSuccess(() -> Component.literal("Updated policy flag for " + count + " player(s)"), false);
+        return count;
+    }
+
+    private static int policyNumber(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets,
+                                    double value, boolean directives) {
+        int changed = 0;
+        for (ServerPlayer target : targets) {
+            PerspectivePolicy policy = PerspectiveServer.policy(target);
+            PerspectivePolicy updated = directives
+                    ? new PerspectivePolicy(policy.allowRequire(), policy.allowSuggest(), (int) value,
+                            policy.maxDistance(), policy.allowOrthographic())
+                    : new PerspectivePolicy(policy.allowRequire(), policy.allowSuggest(), policy.maxDirectives(),
+                            (float) value, policy.allowOrthographic());
+            PerspectiveServer.setPolicy(target, updated);
+            changed++;
+        }
+        int count = changed;
+        ctx.getSource().sendSuccess(() -> Component.literal("Updated policy limit for " + count + " player(s)"), false);
+        return count;
+    }
+
+    private static int policyQuery(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets) {
+        for (ServerPlayer target : targets) {
+            PerspectivePolicy policy = PerspectiveServer.policy(target);
+            String name = target.getGameProfile().getName();
+            ctx.getSource().sendSuccess(() -> Component.literal(name + ": policy=" + policy), false);
+        }
+        return targets.size();
     }
 
     // ------------------------------------------------------------------ lock
@@ -203,8 +285,14 @@ public final class PerspectiveCommand {
             CameraTarget value = new CameraTarget(base.target().position(), base.target().yaw(), base.target().pitch(),
                     base.target().distance(), base.target().fov(), base.target().projection(),
                     base.target().hudVisible(), locks);
+            EnumSet<CameraChannel> channels = EnumSet.copyOf(base.channels());
+            if (!locks.isEmpty()) {
+                channels.add(CameraChannel.INPUT_LOCK);
+            } else {
+                channels.remove(CameraChannel.INPUT_LOCK);
+            }
             CameraDirective updated = new CameraDirective(base.id(), base.owner(), PerspectiveServer.nextSeq(target),
-                    base.priority(), base.enforcement(), base.channels(), value, base.fadeInTicks(),
+                    base.priority(), base.enforcement(), channels, value, base.fadeInTicks(),
                     base.fadeOutTicks(), base.easing(), base.durationTicks(), base.requiresAck(),
                     base.keepOnDeath(), base.startTick());
             PerspectiveServer.replace(target, updated);

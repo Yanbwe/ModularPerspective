@@ -16,6 +16,7 @@ import org.yanbwe.modularperspective.api.camera.CameraTarget;
 import org.yanbwe.modularperspective.api.camera.Easing;
 import org.yanbwe.modularperspective.api.camera.Enforcement;
 import org.yanbwe.modularperspective.api.camera.InputLock;
+import org.yanbwe.modularperspective.api.camera.PerspectivePolicy;
 import org.yanbwe.modularperspective.api.camera.Position3;
 import org.yanbwe.modularperspective.api.camera.Projection;
 
@@ -28,6 +29,7 @@ import org.yanbwe.modularperspective.api.camera.Projection;
 public record CameraSnapshotPayload(
         long revision,
         boolean hudVisible,
+        PerspectivePolicy policy,
         List<CameraDirective> directives) implements CustomPacketPayload {
 
     public static final Type<CameraSnapshotPayload> TYPE = new Type<>(
@@ -37,6 +39,7 @@ public record CameraSnapshotPayload(
             StreamCodec.of(CameraSnapshotPayload::encode, CameraSnapshotPayload::decode);
 
     public CameraSnapshotPayload {
+        policy = policy == null ? PerspectivePolicy.DEFAULT : policy;
         directives = List.copyOf(directives);
     }
 
@@ -48,6 +51,7 @@ public record CameraSnapshotPayload(
     private static void encode(FriendlyByteBuf buf, CameraSnapshotPayload payload) {
         buf.writeVarLong(payload.revision);
         buf.writeBoolean(payload.hudVisible);
+        writePolicy(buf, payload.policy);
         buf.writeVarInt(payload.directives.size());
         for (CameraDirective directive : payload.directives) {
             writeDirective(buf, directive);
@@ -57,12 +61,26 @@ public record CameraSnapshotPayload(
     private static CameraSnapshotPayload decode(FriendlyByteBuf buf) {
         long revision = buf.readVarLong();
         boolean hudVisible = buf.readBoolean();
+        PerspectivePolicy policy = readPolicy(buf);
         int size = buf.readVarInt();
         List<CameraDirective> directives = new ArrayList<>(size);
         for (int i = 0; i < size; i++) {
             directives.add(readDirective(buf));
         }
-        return new CameraSnapshotPayload(revision, hudVisible, directives);
+        return new CameraSnapshotPayload(revision, hudVisible, policy, directives);
+    }
+
+    private static void writePolicy(FriendlyByteBuf buf, PerspectivePolicy policy) {
+        buf.writeBoolean(policy.allowRequire());
+        buf.writeBoolean(policy.allowSuggest());
+        buf.writeVarInt(policy.maxDirectives());
+        buf.writeFloat(policy.maxDistance());
+        buf.writeBoolean(policy.allowOrthographic());
+    }
+
+    private static PerspectivePolicy readPolicy(FriendlyByteBuf buf) {
+        return new PerspectivePolicy(buf.readBoolean(), buf.readBoolean(), buf.readVarInt(),
+                buf.readFloat(), buf.readBoolean());
     }
 
     // ------------------------------------------------------------------ 指令编码

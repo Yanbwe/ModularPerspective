@@ -136,9 +136,33 @@ public final class CameraStack {
         return new ResolvedCameraState(position, yaw, pitch, distance, fov, projection, hudVisible, locks);
     }
 
+    /** 某通道当前赢家（到位回执、SUGGEST 顶掉判断用，§5.5）。 */
     @Nullable
-    private CameraDirective best(CameraChannel channel) {
+    public CameraDirective winner(CameraChannel channel) {
+        return best(channel);
+    }
+
+    /**
+     * 某个锁位当前来自哪条指令（并集语义下的“来源”）：取持有该位且优先级最高者（§5.3、§5.4）。
+     * 玩家尝试操作该轴时，据此判断是 REQUIRE（拦截）还是 SUGGEST（允许并上报 Overridden）。
+     */
+    @Nullable
+    public CameraDirective lockSource(InputLock lock) {
         CameraDirective best = null;
+        for (CameraDirective directive : byId.values()) {
+            if (!directive.hasChannel(CameraChannel.INPUT_LOCK) || directive.target().locks() == null
+                    || !directive.target().locks().contains(lock)) {
+                continue;
+            }
+            if (best == null || PRECEDENCE.compare(directive, best) > 0) {
+                best = directive;
+            }
+        }
+        return best;
+    }
+
+    @Nullable
+    private CameraDirective best(CameraChannel channel) {        CameraDirective best = null;
         for (CameraDirective directive : byId.values()) {
             if (!directive.hasChannel(channel) || !targetHasValue(directive.target(), channel)) {
                 continue;

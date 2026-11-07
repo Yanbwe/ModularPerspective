@@ -14,7 +14,7 @@ import org.yanbwe.modularperspective.server.PerspectiveServer;
  * Neo↔Neo 之间的协议版本必须完全一致（§7.5），版本号随线格式变更递增。
  */
 public final class PerspectiveNetwork {
-    private static final String PROTOCOL_VERSION = "1";
+    private static final String PROTOCOL_VERSION = "2";
 
     private PerspectiveNetwork() {}
 
@@ -25,6 +25,18 @@ public final class PerspectiveNetwork {
                 (payload, context) -> context.enqueueWork(() -> {
                     if (context.player() instanceof ServerPlayer player) {
                         PerspectiveServer.onArrived(player, payload);
+                    }
+                }));
+        registrar.playToServer(CameraOverriddenPayload.TYPE, CameraOverriddenPayload.CODEC,
+                (payload, context) -> context.enqueueWork(() -> {
+                    if (context.player() instanceof ServerPlayer player) {
+                        PerspectiveServer.onOverridden(player, payload);
+                    }
+                }));
+        registrar.playToServer(CameraRefusedPayload.TYPE, CameraRefusedPayload.CODEC,
+                (payload, context) -> context.enqueueWork(() -> {
+                    if (context.player() instanceof ServerPlayer player) {
+                        PerspectiveServer.onRefused(player, payload);
                     }
                 }));
     }
@@ -41,5 +53,15 @@ public final class PerspectiveNetwork {
     /** 客户端回执上行。 */
     public static void sendArrived(String id, long seq, long revision) {
         PacketDistributor.sendToServer(new CameraArrivedPayload(id, seq, revision));
+    }
+
+    /** 客户端上报“SUGGEST 锁被玩家操作顶掉”（§5.3）。 */
+    public static void sendOverridden(String id, java.util.EnumSet<org.yanbwe.modularperspective.api.camera.InputLock> locks) {
+        PacketDistributor.sendToServer(new CameraOverriddenPayload(id, locks));
+    }
+
+    /** 客户端上报“拒绝执行某条服务端指令”（§5.4）。 */
+    public static void sendRefused(String id, org.yanbwe.modularperspective.api.camera.EndReason reason) {
+        PacketDistributor.sendToServer(new CameraRefusedPayload(id, reason));
     }
 }

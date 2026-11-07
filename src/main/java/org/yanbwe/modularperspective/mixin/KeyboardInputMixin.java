@@ -33,7 +33,8 @@ public abstract class KeyboardInputMixin {
                 input.forwardImpulse = forward * cos + left * sin;
             }
             // §9.2：MOVE 锁只清水平输入；跳跃/潜行不锁（服务端同步会分裂）。
-            if (ClientPerspective.isInputLocked(InputLock.MOVE)) {
+            // §5.4：REQUIRE 拦截，SUGGEST 让玩家操作生效并上报 Overridden。
+            if (ClientPerspective.consumeLockedInput(InputLock.MOVE)) {
                 input.leftImpulse = 0.0F;
                 input.forwardImpulse = 0.0F;
             }

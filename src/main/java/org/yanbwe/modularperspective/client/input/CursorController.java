@@ -17,6 +17,7 @@ import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import org.lwjgl.glfw.GLFW;
 import org.yanbwe.modularperspective.ModularPerspective;
+import org.yanbwe.modularperspective.api.camera.InputLock;
 import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
 import org.yanbwe.modularperspective.mixin.MinecraftAccessor;
@@ -98,10 +99,13 @@ public final class CursorController {
                 double deltaY = minecraft.mouseHandler.ypos() - dragLastY;
                 dragLastX = minecraft.mouseHandler.xpos();
                 dragLastY = minecraft.mouseHandler.ypos();
-                ClientPerspective.addYawOffset((float) (-deltaX * DRAG_SENSITIVITY));
-                if (Screen.hasAltDown()) {
-                    // §9.1 调整（m02434）：中键默认只左右转；按住 Alt 才是自由旋转（yaw + pitch）。
-                    ClientPerspective.addPitchOffset((float) (deltaY * DRAG_SENSITIVITY));
+                // §5.4：REQUIRE 锁拦截；SUGGEST 锁由玩家操作顶掉（consumeLockedInput 内部上报 Overridden）。
+                if (!ClientPerspective.consumeLockedInput(InputLock.ROTATE)) {
+                    ClientPerspective.addYawOffset((float) (-deltaX * DRAG_SENSITIVITY));
+                    if (Screen.hasAltDown()) {
+                        // §9.1 调整（m02434）：中键默认只左右转；按住 Alt 才是自由旋转（yaw + pitch）。
+                        ClientPerspective.addPitchOffset((float) (deltaY * DRAG_SENSITIVITY));
+                    }
                 }
             }
         } else if (minecraft.screen != null) {

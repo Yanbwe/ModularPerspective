@@ -5,6 +5,7 @@ import java.util.EnumSet;
 import java.util.List;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
+import net.neoforged.neoforge.common.NeoForge;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.yanbwe.modularperspective.ModularPerspective;
@@ -14,9 +15,13 @@ import org.yanbwe.modularperspective.api.camera.CameraTarget;
 import org.yanbwe.modularperspective.api.camera.Easing;
 import org.yanbwe.modularperspective.api.camera.EndReason;
 import org.yanbwe.modularperspective.api.camera.Enforcement;
+import org.yanbwe.modularperspective.api.camera.InputLock;
 import org.yanbwe.modularperspective.api.camera.PerspectivePolicy;
+import org.yanbwe.modularperspective.api.camera.PerspectivePolicyChangedEvent;
 import org.yanbwe.modularperspective.api.camera.Projection;
 import org.yanbwe.modularperspective.network.CameraArrivedPayload;
+import org.yanbwe.modularperspective.network.CameraOverriddenPayload;
+import org.yanbwe.modularperspective.network.CameraRefusedPayload;
 import org.yanbwe.modularperspective.network.CameraSnapshotPayload;
 import org.yanbwe.modularperspective.network.PerspectiveNetwork;
 
@@ -43,6 +48,10 @@ public final class PerspectiveServer {
                                        int durationTicks, boolean requiresAck, boolean keepOnDeath) {
         PerspectiveAttachment state = state(target);
         validate(state.policy(), enforcement, value);
+        long others = state.directives().stream().filter(existing -> !existing.id().equals(id)).count();
+        if (others >= state.policy().maxDirectives()) {
+            throw new IllegalArgumentException("policy: too many directives (max " + state.policy().maxDirectives() + ")");
+        }
         long seq = state.allocateSeq();
         long now = target.serverLevel().getGameTime();
         CameraDirective directive = new CameraDirective(id, target.getUUID(), seq, priority, enforcement,
@@ -85,9 +94,18 @@ public final class PerspectiveServer {
         return state(target).allocateSeq();
     }
 
-    /** 设置服务端策略（§6.5；命令/外部 API 用）。 */
+    /** 设置服务端策略（§6.5；命令/外部 API 用）。策略变化会置 dirty 并派发事件。 */
     public static void setPolicy(ServerPlayer target, PerspectivePolicy policy) {
-        state(target).setPolicy(policy);
+        PerspectiveAttachment state = state(target);
+        PerspectivePolicy previous = state.policy();
+        if (previous.equals(policy)) {
+            return;
+        }
+        state.setPolicy(policy);
+        state.markDirty();
+        NeoForge.EVENT_BUS.post(new PerspectivePolicyChangedEvent(target, previous, policy));
+        ModularPerspective.LOGGER.info("[perspective] policy changed for {}: {} -> {}",
+                target.getGameProfile().getName(), previous, policy);
     }
 
     public static List<CameraDirective> directives(ServerPlayer target) {
@@ -124,10 +142,10 @@ public final class PerspectiveServer {
     private static void sendSnapshot(ServerPlayer player, PerspectiveAttachment state) {
         state.setRevision(state.revision() + 1);
         CameraSnapshotPayload payload = new CameraSnapshotPayload(state.revision(), state.hudVisible(),
-                List.copyOf(state.directives()));
+                state.policy(), List.copyOf(state.directives()));
         PerspectiveNetwork.sendSnapshot(player, payload);
-        ModularPerspective.LOGGER.info("[perspective] snapshot sent to {} revision={} directives={}",
-                player.getGameProfile().getName(), state.revision(), payload.directives().size());
+        ModularPerspective.LOGGER.info("[perspective] snapshot sent to {} revision={} directives={} policy={}",
+                player.getGameProfile().getName(), state.revision(), payload.directives().size(), payload.policy());
     }
 
     /** 登录/重生/换维度后强制补发全量快照（§7.3 发送时机）。 */
@@ -194,6 +212,41 @@ public final class PerspectiveServer {
         }
         ModularPerspective.LOGGER.info("[perspective] arrived {} seq={} from {} (revision={})",
                 payload.id(), payload.seq(), player.getGameProfile().getName(), payload.revision());
+    }
+
+    /** 玩家操作顶掉 SUGGEST 锁位：移除该 id 指令上的对应位并补发快照（§5.3）。 */
+    public static void onOverridden(ServerPlayer player, CameraOverriddenPayload payload) {
+        PerspectiveAttachment state = state(player);
+        CameraDirective source = state.directives().stream()
+                .filter(directive -> directive.id().equals(payload.id()))
+                .findFirst()
+                .orElse(null);
+        if (source == null) {
+            ModularPerspective.LOGGER.debug("[perspective] overridden for unknown directive {}", payload.id());
+            return;
+        }
+        if (source.enforcement() != Enforcement.SUGGEST || source.target().locks() == null) {
+            ModularPerspective.LOGGER.debug("[perspective] overridden ignored for {} (enforcement={})",
+                    payload.id(), source.enforcement());
+            return;
+        }
+        EnumSet<InputLock> locks = EnumSet.copyOf(source.target().locks());
+        locks.removeAll(payload.locks());
+        replace(player, source.withTarget(source.target().withLocks(locks)));
+        ModularPerspective.LOGGER.info("[perspective] overridden {} locks={} from {}",
+                payload.id(), payload.locks(), player.getGameProfile().getName());
+    }
+
+    /** 客户端拒绝执行：移除指令并记录 POLICY_REFUSED（§5.4、§7.4）。 */
+    public static void onRefused(ServerPlayer player, CameraRefusedPayload payload) {
+        PerspectiveAttachment state = state(player);
+        boolean removed = state.directives().removeIf(directive -> directive.id().equals(payload.id()));
+        if (removed) {
+            state.markDirty();
+        }
+        ModularPerspective.LOGGER.info("[perspective] refused {} ({}) from {}{}",
+                payload.id(), payload.reason(), player.getGameProfile().getName(),
+                removed ? "" : " (unknown directive)");
     }
 
     // ------------------------------------------------------------------ 策略

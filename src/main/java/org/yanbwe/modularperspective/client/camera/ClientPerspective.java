@@ -14,18 +14,23 @@ import net.neoforged.neoforge.client.event.ViewportEvent;
 import org.jetbrains.annotations.Nullable;
 import org.joml.Matrix4f;
 import org.joml.Vector3f;
+import org.yanbwe.modularperspective.Config;
 import org.yanbwe.modularperspective.ModularPerspective;
 import org.yanbwe.modularperspective.client.input.CursorController;
 import org.yanbwe.modularperspective.api.camera.CameraChannel;
 import org.yanbwe.modularperspective.api.camera.CameraDirective;
 import org.yanbwe.modularperspective.api.camera.CameraTarget;
 import org.yanbwe.modularperspective.api.camera.Easing;
+import org.yanbwe.modularperspective.api.camera.EndReason;
 import org.yanbwe.modularperspective.api.camera.Enforcement;
 import org.yanbwe.modularperspective.api.camera.InputLock;
 import org.yanbwe.modularperspective.api.camera.Position3;
+import org.yanbwe.modularperspective.api.camera.PerspectivePolicy;
 import org.yanbwe.modularperspective.api.camera.Projection;
 import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
+import org.yanbwe.modularperspective.api.camera.ServerControl;
 import org.yanbwe.modularperspective.network.CameraSnapshotPayload;
+import org.yanbwe.modularperspective.network.PerspectiveNetwork;
 
 /**
  * 客户端相机状态（docs/design.md §5.6、§8.1、§8.2）。
@@ -86,6 +91,10 @@ public final class ClientPerspective {
     private static long snapshotRevision = -1L;
     /** 服务端下发的 HUD 可见性（HUD 通道在 M4 接线，这里先存）。 */
     private static Boolean serverHudVisible;
+    /** 服务端快照携带的策略（§6.5）；只用于客户端本地降级/拒绝判断。 */
+    private static PerspectivePolicy serverPolicy = PerspectivePolicy.DEFAULT;
+    /** 已发送到位回执的指令键（id#seq），避免重复回执（§5.5）。 */
+    private static final Set<String> arrivedSent = new HashSet<>();
 
     private ClientPerspective() {}
 
@@ -163,6 +172,29 @@ public final class ClientPerspective {
         return state != null && state.locks(lock);
     }
 
+    /**
+     * 玩家尝试操作某个被锁的轴（§5.3、§5.4）：
+     * REQUIRE → 返回 true（拦截输入）；SUGGEST → 移除该锁位并上报 Overridden，返回 false（玩家操作生效）。
+     * 没有锁来源时返回 false。
+     */
+    public static boolean consumeLockedInput(InputLock lock) {
+        CameraDirective source = STACK.lockSource(lock);
+        if (source == null) {
+            return false;
+        }
+        if (source.enforcement() == Enforcement.REQUIRE) {
+            return true;
+        }
+        EnumSet<InputLock> remaining = EnumSet.copyOf(source.target().locks());
+        remaining.remove(lock);
+        STACK.put(source.withTarget(source.target().withLocks(remaining)));
+        lastResolvedTick = Long.MIN_VALUE;
+        PerspectiveNetwork.sendOverridden(source.id(), EnumSet.of(lock));
+        ModularPerspective.LOGGER.debug("[perspective] SUGGEST lock {} overridden on {} (seq={})",
+                lock, source.id(), source.seq());
+        return false;
+    }
+
     // ------------------------------------------------------------------ tick / 渲染读取
 
     /** 客户端 tick 调用（{@code ClientTickEvent.Post}）：解析仲裁、平滑、切相机类型。 */
@@ -193,6 +225,7 @@ public final class ClientPerspective {
         if (isOrtho() && minecraft.options.getCameraType() != CameraType.THIRD_PERSON_BACK) {
             minecraft.options.setCameraType(CameraType.THIRD_PERSON_BACK);
         }
+        sendArrivalsIfNeeded();
     }
 
     /** 当前生效输出（渲染期唯一来源；null = 完全原版）。 */
@@ -245,11 +278,22 @@ public final class ClientPerspective {
         }
         snapshotRevision = payload.revision();
         serverHudVisible = payload.hudVisible();
+        serverPolicy = payload.policy();
         for (String id : serverDirectiveIds) {
             STACK.remove(id);
         }
         serverDirectiveIds.clear();
+        ServerControl control = clientServerControl();
         for (CameraDirective directive : payload.directives()) {
+            if (control == ServerControl.DISABLED && directive.enforcement() == Enforcement.REQUIRE) {
+                PerspectiveNetwork.sendRefused(directive.id(), EndReason.POLICY_REFUSED);
+                ModularPerspective.LOGGER.info(
+                        "[perspective] refused REQUIRE directive {} (client serverControl=DISABLED)", directive.id());
+                continue;
+            }
+            if (control == ServerControl.SUGGEST_ONLY && directive.enforcement() == Enforcement.REQUIRE) {
+                directive = directive.withEnforcement(Enforcement.SUGGEST);
+            }
             STACK.put(directive);
             serverDirectiveIds.add(directive.id());
         }
@@ -257,6 +301,77 @@ public final class ClientPerspective {
         ModularPerspective.LOGGER.info("[perspective] snapshot applied revision={} directives={}",
                 payload.revision(), payload.directives().size());
     }
+    /** 每 tick 检查到位回执（§5.5）：仍是各通道赢家、误差内、此前未发过。 */
+    private static void sendArrivalsIfNeeded() {
+        ResolvedCameraState state = applied;
+        if (state == null || STACK.directives().isEmpty()) {
+            return;
+        }
+        for (CameraDirective directive : STACK.directives()) {
+            if (!directive.requiresAck()) {
+                continue;
+            }
+            String key = directive.id() + "#" + directive.seq();
+            if (arrivedSent.contains(key) || !isWinnerForAllChannels(directive)
+                    || !withinTolerance(directive.target(), state)) {
+                continue;
+            }
+            arrivedSent.add(key);
+            PerspectiveNetwork.sendArrived(directive.id(), directive.seq(), snapshotRevision);
+            ModularPerspective.LOGGER.info("[perspective] arrived sent id={} seq={} revision={}",
+                    directive.id(), directive.seq(), snapshotRevision);
+        }
+    }
+
+    private static boolean isWinnerForAllChannels(CameraDirective directive) {
+        for (CameraChannel channel : directive.channels()) {
+            if (channel == CameraChannel.INPUT_LOCK) {
+                continue;
+            }
+            CameraDirective winner = STACK.winner(channel);
+            if (winner == null || !winner.id().equals(directive.id()) || winner.seq() != directive.seq()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean withinTolerance(CameraTarget target, ResolvedCameraState state) {
+        if (target.position() != null
+                && (state.position() == null || state.position().distanceSquared(target.position()) > 1.0E-4)) {
+            return false;
+        }
+        if (target.yaw() != null
+                && (state.yaw() == null || Math.abs(Mth.wrapDegrees(state.yaw() - target.yaw())) > 0.1F)) {
+            return false;
+        }
+        if (target.pitch() != null && (state.pitch() == null || Math.abs(state.pitch() - target.pitch()) > 0.1F)) {
+            return false;
+        }
+        if (target.distance() != null
+                && (state.distance() == null || Math.abs(state.distance() - target.distance()) > 0.01F)) {
+            return false;
+        }
+        if (target.fov() != null && (state.fov() == null || Math.abs(state.fov() - target.fov()) > 0.1F)) {
+            return false;
+        }
+        if (target.projection() != null && state.projection() != target.projection()) {
+            return false;
+        }
+        if (target.hudVisible() != null && !target.hudVisible().equals(state.hudVisible())) {
+            return false;
+        }
+        return target.locks() == null || state.locks().containsAll(target.locks());
+    }
+
+    private static ServerControl clientServerControl() {
+        try {
+            return Config.SERVER_CONTROL.get();
+        } catch (IllegalStateException exception) {
+            return ServerControl.ALLOW;
+        }
+    }
+
     public static boolean isOrtho() {
         return applied != null && applied.orthographic();
     }
@@ -267,6 +382,8 @@ public final class ClientPerspective {
         serverDirectiveIds.clear();
         snapshotRevision = -1L;
         serverHudVisible = null;
+        serverPolicy = PerspectivePolicy.DEFAULT;
+        arrivedSent.clear();
         applied = null;
         previous = null;
         topDown = false;

@@ -19,6 +19,8 @@ import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
 import net.neoforged.neoforge.common.NeoForge;
 import org.lwjgl.glfw.GLFW;
+import org.yanbwe.modularperspective.api.camera.InputLock;
+import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
 import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
 import org.yanbwe.modularperspective.client.input.CursorController;
@@ -70,6 +72,9 @@ public final class ModularPerspectiveClient {
     private static double autoMoveStartX;
     private static double autoMoveStartZ;
     private static int autoTicks;
+    /** M3 自动验收的阶段机：服务端可能因失焦暂停而延迟发包，按“状态到达”推进而不是固定 tick。 */
+    private static int autoPhase;
+    private static int autoPhaseTick;
 
     private ModularPerspectiveClient() {}
 
@@ -158,11 +163,16 @@ public final class ModularPerspectiveClient {
             return;
         }
         if (Screen.hasControlDown()) {
-            ClientPerspective.addDistance((float) delta);
             event.setCanceled(true);
+            // §5.4：ZOOM 被 REQUIRE 锁住时拦截；SUGGEST 锁由玩家操作顶掉。
+            if (!ClientPerspective.consumeLockedInput(InputLock.ZOOM)) {
+                ClientPerspective.addDistance((float) delta);
+            }
         } else if (Screen.hasAltDown()) {
-            ClientPerspective.addYawOffset((float) delta * 5.0F);
             event.setCanceled(true);
+            if (!ClientPerspective.consumeLockedInput(InputLock.ROTATE)) {
+                ClientPerspective.addYawOffset((float) delta * 5.0F);
+            }
         }
     }
 
@@ -239,25 +249,97 @@ public final class ModularPerspectiveClient {
      * 再 {@code /perspective clear @s} → 快照清空（回到原版视角），各阶段截图。
      */
     private static void runM3Verification(Minecraft minecraft) {
-        if (autoTicks == AUTO_ENABLE_AT) {
+        if (autoTicks < AUTO_ENABLE_AT) {
+            return;
+        }
+        if (autoPhase == 0) {
             ClientPerspective.setTopDown(false);
             runServerCommand(minecraft, "perspective preset @s top-down 200");
-            ModularPerspective.LOGGER.info("[auto] M3 preset command sent; topDown={} ortho={}",
-                    ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
-        } else if (autoTicks == AUTO_SHOT_ON_AT) {
-            grabScreenshot(minecraft, "m3-preset.png");
-            ModularPerspective.LOGGER.info("[auto] M3 after preset snapshot: topDown={} ortho={}",
-                    ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
-        } else if (autoTicks == AUTO_MOVE_STOP_AT) {
-            runServerCommand(minecraft, "perspective lock @s rotate off");
-            ModularPerspective.LOGGER.info("[auto] M3 lock command sent");
-        } else if (autoTicks == AUTO_DISABLE_AT) {
-            runServerCommand(minecraft, "perspective clear @s");
-            ModularPerspective.LOGGER.info("[auto] M3 clear command sent");
-        } else if (autoTicks == AUTO_SHOT_OFF_AT) {
-            grabScreenshot(minecraft, "m3-cleared.png");
-            ModularPerspective.LOGGER.info("[auto] M3 verification finished (topDown={} ortho={})",
-                    ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+            autoPhase = 1;
+            autoPhaseTick = autoTicks;
+            ModularPerspective.LOGGER.info("[auto] M3 phase1: preset command sent");
+            return;
+        }
+
+        ResolvedCameraState state = ClientPerspective.current();
+        switch (autoPhase) {
+            case 1 -> {
+                // 等快照真正生效（服务器失焦暂停时可能延迟），再截图并发 requiresAck 指令。
+                if (state != null && state.orthographic()) {
+                    runServerCommand(minecraft, "perspective camera @s 0 45 100");
+                    autoPhase = 22;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase2: preset applied, ack camera sent; locks={}",
+                            state.locks());
+                }
+            }
+            case 22 -> {
+                // 帧缓冲要等渲染一帧后才反映新相机，隔几 tick 再截图（否则截到上一帧）。
+                if (autoTicks - autoPhaseTick >= 5) {
+                    grabScreenshot(minecraft, "m3-preset.png");
+                    autoPhase = 2;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase2b: preset screenshot taken");
+                }
+            }
+            case 2 -> {
+                // 等预设的 SUGGEST ROTATE 锁位出现 → 模拟玩家顶掉，应上报 Overridden（§5.3）。
+                if (state != null && state.locks().contains(InputLock.ROTATE)) {
+                    boolean blocked = ClientPerspective.consumeLockedInput(InputLock.ROTATE);
+                    autoPhase = 3;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase3: override ROTATE blocked={} locks={}",
+                            blocked, ClientPerspective.current() == null ? "null" : ClientPerspective.current().locks());
+                } else if (autoTicks - autoPhaseTick > 200) {
+                    autoPhase = 3;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.warn("[auto] M3 phase3: no ROTATE lock observed, skipping override test");
+                }
+            }
+            case 3 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    runServerCommand(minecraft, "perspective policy @s allowSuggest off");
+                    autoPhase = 4;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase4: policy off sent");
+                }
+            }
+            case 4 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    // 策略禁止 SUGGEST 后 push 应失败（命令层 sendFailure，聊天栏 "SUGGEST is not allowed"）。
+                    runServerCommand(minecraft, "perspective camera @s 0 45 20");
+                    autoPhase = 5;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase5: policy rejection test sent");
+                }
+            }
+            case 5 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    runServerCommand(minecraft, "perspective policy @s allowSuggest on");
+                    autoPhase = 6;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase6: policy on sent");
+                }
+            }
+            case 6 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    runServerCommand(minecraft, "perspective clear @s");
+                    autoPhase = 7;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase7: clear sent");
+                }
+            }
+            case 7 -> {
+                if (autoTicks - autoPhaseTick >= 20) {
+                    grabScreenshot(minecraft, "m3-cleared.png");
+                    autoPhase = 8;
+                    ModularPerspective.LOGGER.info("[auto] M3 verification finished (topDown={} ortho={})",
+                            ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+                }
+            }
+            default -> {
+                // 完成：不再动作。
+            }
         }
     }
 

@@ -56,4 +56,9 @@ public record CameraTarget(
     public boolean hasLocks() {
         return locks != null;
     }
+
+    /** 复制一个只替换锁位集合的目标（锁位可能变空，但“声明了 INPUT_LOCK 通道”的事实保留，§5.3）。 */
+    public CameraTarget withLocks(EnumSet<InputLock> newLocks) {
+        return new CameraTarget(position, yaw, pitch, distance, fov, projection, hudVisible, newLocks);
+    }
 }
