@@ -32,6 +32,7 @@ public final class BlockCuller {
     private static final double RAY_STEP = 0.25D;
     /** 视线采样点周围剔除的半径（格）：1 表示 3×3×3 的隧道截面。 */
     private static final int MAX_SHAPE_BLOCKS = 1024;
+    private static final int CARVE_RADIUS = 1;
     private static final double MAX_FLOOD_DISTANCE = 48.0D;
     /** 每条视线最多采样多少步，防止极端距离下过慢。 */
     private static final int MAX_STEPS_PER_RAY = 64;
@@ -198,7 +199,9 @@ public final class BlockCuller {
             if (!state.isSolidRender(level, center)) {
                 continue;
             }
-            floodCarveShape(level, center, minY, playerSection, visited);
+            if (!floodCarveShape(level, center, minY, playerSection, visited)) {
+                carveTunnel(level, center);
+            }
             if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
                 return;
             }
@@ -207,23 +210,21 @@ public final class BlockCuller {
 
     /**
      * 从首个命中方块出发，沿 6 邻接把连通的实心方块整体剔除（旧模组 SightlineMask 的“连通形状”近似）。
-     * 限制单形状块数与相机距离，并跳过玩家脚下以下的方块，避免把地面/大块地形整片挖掉。
+     * 先做计数：连通形状超过 {@link #MAX_SHAPE_BLOCKS} 块时返回 false，调用方退回只挖视线隧道，
+     * 避免把山体/屋顶这类超大连通地形挖掉一块。
+     * 另外跳过玩家脚下以下的方块，避免挖穿地面。
      */
-    private static void floodCarveShape(Level level, BlockPos start, int minY, long playerSection, LongOpenHashSet visited) {
+    private static boolean floodCarveShape(Level level, BlockPos start, int minY, long playerSection, LongOpenHashSet visited) {
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        java.util.List<BlockPos> collected = new java.util.ArrayList<>();
         queue.add(start);
-        int added = 0;
+        collected.add(start);
         double maxDistanceSq = MAX_FLOOD_DISTANCE * MAX_FLOOD_DISTANCE;
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        while (!queue.isEmpty() && added < MAX_SHAPE_BLOCKS && NEXT_CULLED.size() < MAX_CULLED_BLOCKS) {
+        while (!queue.isEmpty()) {
             BlockPos pos = queue.poll();
             if (pos.getY() < minY || SectionPos.asLong(pos) == playerSection) {
                 continue;
-            }
-            long key = pos.asLong();
-            if (!NEXT_CULLED.contains(key)) {
-                NEXT_CULLED.add(key);
-                added++;
             }
             for (int axis = 0; axis < 3; axis++) {
                 for (int direction = -1; direction <= 1; direction += 2) {
@@ -251,7 +252,41 @@ public final class BlockCuller {
                     }
                     BlockState state = level.getBlockState(neighbor);
                     if (state.isSolidRender(level, neighbor)) {
+                        collected.add(neighbor);
+                        if (collected.size() > MAX_SHAPE_BLOCKS) {
+                            return false;
+                        }
                         queue.add(neighbor);
+                    }
+                }
+            }
+        }
+        for (BlockPos pos : collected) {
+            if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
+                break;
+            }
+            NEXT_CULLED.add(pos.asLong());
+        }
+        return true;
+    }
+
+    /** 连通形状过大时的退路：只挖命中点周围 (2*CARVE_RADIUS+1)³ 的实心方块。 */
+    private static void carveTunnel(Level level, BlockPos center) {
+        for (int dx = -CARVE_RADIUS; dx <= CARVE_RADIUS; dx++) {
+            for (int dy = -CARVE_RADIUS; dy <= CARVE_RADIUS; dy++) {
+                for (int dz = -CARVE_RADIUS; dz <= CARVE_RADIUS; dz++) {
+                    BlockPos pos = center.offset(dx, dy, dz);
+                    long key = pos.asLong();
+                    if (NEXT_CULLED.contains(key)) {
+                        continue;
+                    }
+                    BlockState state = level.getBlockState(pos);
+                    if (!state.isSolidRender(level, pos)) {
+                        continue;
+                    }
+                    NEXT_CULLED.add(key);
+                    if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
+                        return;
                     }
                 }
             }

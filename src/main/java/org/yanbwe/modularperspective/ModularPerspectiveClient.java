@@ -398,6 +398,8 @@ public final class ModularPerspectiveClient {
                 }
             }
             default -> {
+
+
                 // 完成：不再动作。
             }
         }
@@ -498,6 +500,8 @@ public final class ModularPerspectiveClient {
                 }
             }
             default -> {
+
+
                 // 完成：不再动作。
             }
         }
@@ -589,6 +593,8 @@ public final class ModularPerspectiveClient {
                 }
             }
             default -> {
+
+
                 // 完成：不再动作。
             }
         }
@@ -654,6 +660,8 @@ public final class ModularPerspectiveClient {
                 }
             }
             default -> {
+
+
                 // 完成：不再动作。
             }
         }
