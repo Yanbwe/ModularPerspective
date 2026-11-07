@@ -1,5 +1,7 @@
 package org.yanbwe.modularperspective.client.cull;
 
+import java.util.ArrayDeque;
+
 import it.unimi.dsi.fastutil.longs.LongIterator;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.client.Minecraft;
@@ -29,7 +31,8 @@ public final class BlockCuller {
     /** 沿视线采样的步长（格）。 */
     private static final double RAY_STEP = 0.25D;
     /** 视线采样点周围剔除的半径（格）：1 表示 3×3×3 的隧道截面。 */
-    private static final int CARVE_RADIUS = 1;
+    private static final int MAX_SHAPE_BLOCKS = 1024;
+    private static final double MAX_FLOOD_DISTANCE = 48.0D;
     /** 每条视线最多采样多少步，防止极端距离下过慢。 */
     private static final int MAX_STEPS_PER_RAY = 64;
     /** 最多同时剔除多少方块，防止实心世界里整屏挖空。 */
@@ -114,6 +117,7 @@ public final class BlockCuller {
 
         NEXT_CULLED.clear();
         int rays = 0;
+        int minY = minecraft.player.blockPosition().getY();
         AABB box = minecraft.player.getBoundingBox();
         Vec3 center = box.getCenter();
         Vec3[] targets = new Vec3[] {
@@ -132,7 +136,7 @@ public final class BlockCuller {
                 break;
             }
             rays++;
-            carveRay(level, camera, target);
+            carveRay(level, camera, target, minY, playerSection);
         }
 
         // 只把“状态变化”的方块所在 section 标脏：静止时不会反复重建。
@@ -164,8 +168,8 @@ public final class BlockCuller {
         }
     }
 
-    /** 从相机向目标点流式采样，把沿线附近的实心方块加入 NEXT_CULLED。 */
-    private static void carveRay(Level level, Vec3 from, Vec3 to) {
+    /** 从相机向目标点流式采样；命中实心方块时按“连通形状”整体剔除（v0.2 连通形状首版）。 */
+    private static void carveRay(Level level, Vec3 from, Vec3 to, int minY, long playerSection) {
         Vec3 delta = to.subtract(from);
         double length = delta.length();
         if (length < 1.0E-4D) {
@@ -174,6 +178,7 @@ public final class BlockCuller {
         Vec3 step = delta.scale(RAY_STEP / length);
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         BlockPos lastCenter = null;
+        LongOpenHashSet visited = new LongOpenHashSet();
         for (int i = 0; i <= MAX_STEPS_PER_RAY && i * RAY_STEP <= length; i++) {
             Vec3 sample = from.add(step.scale(i));
             cursor.set(sample.x, sample.y, sample.z);
@@ -182,30 +187,71 @@ public final class BlockCuller {
                 continue;
             }
             lastCenter = center;
-            carveAround(level, center);
+            long key = center.asLong();
+            if (NEXT_CULLED.contains(key) || !visited.add(key)) {
+                continue;
+            }
+            if (center.getY() < minY || SectionPos.asLong(center) == playerSection) {
+                continue;
+            }
+            BlockState state = level.getBlockState(center);
+            if (!state.isSolidRender(level, center)) {
+                continue;
+            }
+            floodCarveShape(level, center, minY, playerSection, visited);
             if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
                 return;
             }
         }
     }
 
-    /** 把一个采样点周围 (2*CARVE_RADIUS+1)³ 内的实心方块加入剔除集。 */
-    private static void carveAround(Level level, BlockPos center) {
-        for (int dx = -CARVE_RADIUS; dx <= CARVE_RADIUS; dx++) {
-            for (int dy = -CARVE_RADIUS; dy <= CARVE_RADIUS; dy++) {
-                for (int dz = -CARVE_RADIUS; dz <= CARVE_RADIUS; dz++) {
-                    BlockPos pos = center.offset(dx, dy, dz);
-                    long key = pos.asLong();
-                    if (NEXT_CULLED.contains(key)) {
+    /**
+     * 从首个命中方块出发，沿 6 邻接把连通的实心方块整体剔除（旧模组 SightlineMask 的“连通形状”近似）。
+     * 限制单形状块数与相机距离，并跳过玩家脚下以下的方块，避免把地面/大块地形整片挖掉。
+     */
+    private static void floodCarveShape(Level level, BlockPos start, int minY, long playerSection, LongOpenHashSet visited) {
+        ArrayDeque<BlockPos> queue = new ArrayDeque<>();
+        queue.add(start);
+        int added = 0;
+        double maxDistanceSq = MAX_FLOOD_DISTANCE * MAX_FLOOD_DISTANCE;
+        BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        while (!queue.isEmpty() && added < MAX_SHAPE_BLOCKS && NEXT_CULLED.size() < MAX_CULLED_BLOCKS) {
+            BlockPos pos = queue.poll();
+            if (pos.getY() < minY || SectionPos.asLong(pos) == playerSection) {
+                continue;
+            }
+            long key = pos.asLong();
+            if (!NEXT_CULLED.contains(key)) {
+                NEXT_CULLED.add(key);
+                added++;
+            }
+            for (int axis = 0; axis < 3; axis++) {
+                for (int direction = -1; direction <= 1; direction += 2) {
+                    cursor.set(pos.getX(), pos.getY(), pos.getZ());
+                    if (axis == 0) {
+                        cursor.setX(pos.getX() + direction);
+                    } else if (axis == 1) {
+                        cursor.setY(pos.getY() + direction);
+                    } else {
+                        cursor.setZ(pos.getZ() + direction);
+                    }
+                    BlockPos neighbor = cursor.immutable();
+                    long neighborKey = neighbor.asLong();
+                    if (!visited.add(neighborKey)) {
                         continue;
                     }
-                    BlockState state = level.getBlockState(pos);
-                    if (!state.isSolidRender(level, pos)) {
+                    if (neighbor.getY() < minY || SectionPos.asLong(neighbor) == playerSection) {
                         continue;
                     }
-                    NEXT_CULLED.add(key);
-                    if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
-                        return;
+                    double dx = neighbor.getX() + 0.5D - lastCamera.x;
+                    double dy = neighbor.getY() + 0.5D - lastCamera.y;
+                    double dz = neighbor.getZ() + 0.5D - lastCamera.z;
+                    if (dx * dx + dy * dy + dz * dz > maxDistanceSq) {
+                        continue;
+                    }
+                    BlockState state = level.getBlockState(neighbor);
+                    if (state.isSolidRender(level, neighbor)) {
+                        queue.add(neighbor);
                     }
                 }
             }
