@@ -5,7 +5,7 @@
 
 - 设计文档：`docs/design.md`（本地文档，**不入 git**；v0.3）
 - 许可证：GPL-3.0
-- 当前状态：M0 骨架 + M1 相机核心 + M2 输入链 + M3 双端链首版（服务端指令栈、全量快照、attachment 持久化、策略/锁/回执上行；客户端仍为通道仲裁 + 帧级插值）+ M4 HUD 平台首版（挂件层 / 注册表 / 调试覆盖层）
+- 当前状态：M0 骨架 + M1 相机核心 + M2 输入链 + M3 双端链首版（服务端指令栈、全量快照、attachment 持久化、策略/锁/回执上行；客户端仍为通道仲裁 + 帧级插值）+ M4 HUD 平台首版（挂件层 / 注册表 / 调试覆盖层） + M5 剔除首版（section 级近似：沿相机→玩家射线隐藏 section）
 
 ## 环境
 
@@ -51,6 +51,11 @@ HudRegistry.register(ResourceLocation.fromNamespaceAndPath("examplemod", "quest_
 控件实现 `HudWidget`（锚点/偏移/尺寸/层级/是否穿透）；`clickThrough=false` 的控件会消费点击与滚轮，不触发原版攻击/挖掘；指针移出矩形后仍保持 capture 直到抬起（§10.3）。
 
 
+
+## 剔除
+
+v0.1 是 **section 级近似**：每 2 tick 从相机向玩家 hitbox 的 9 个采样点投射射线（步长 0.2 格），命中方块即隐藏其所在 16³ section（跳过玩家所在 section），`LevelRenderer#renderSectionLayer` 只过滤本帧的 section 列表，不改区块 mesh、不重建。配置 `culling.enabled` 可整体关闭；调试覆盖层显示 `hidden`/`rays` 计数。尚未移植旧版 DungeonsPerspective 的房间/连通形状剔除（RoomScanner/SightlineScanner），v0.2 再评估。
+
 ## 目录
 
 ```
@@ -61,6 +66,7 @@ src/main/java/org/yanbwe/modularperspective/
   api/camera/                      公开类型：通道、指令、目标、快照、锁、强制级别、结束原因、缓动、投影、策略
   client/camera/                   相机栈与客户端预设（CameraStack / ClientPerspective）
   client/input/                    伪解锁光标状态机（CursorController）
+  client/cull/                     section 级剔除（SectionCuller：相机→玩家射线）
   api/hud/                         公开 HUD 类型（Anchor/HudWidget/HudContext/HudLayout/HudRegistry）
   client/hud/                      HUD 宿主与内置控件（ClientHud/CameraStatusWidget/DebugHudWidget）
   client/PerspectiveClientNetwork  客户端 payload 接收（快照 → CameraStack）

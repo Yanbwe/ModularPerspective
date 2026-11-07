@@ -7,6 +7,7 @@ import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
 import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.HitResult;
 import net.neoforged.bus.api.IEventBus;
@@ -26,10 +27,12 @@ import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
 import org.yanbwe.modularperspective.api.hud.HudRegistry;
 import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
+import org.yanbwe.modularperspective.client.cull.SectionCuller;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
 import org.yanbwe.modularperspective.client.hud.DebugHudWidget;
 import org.yanbwe.modularperspective.client.input.CursorController;
+import net.minecraft.world.level.block.Blocks;
 
 /**
  * 客户端入口（仅客户端类加载）。
@@ -61,6 +64,7 @@ public final class ModularPerspectiveClient {
     private static final String AUTO_MARKER_M3 = "m3-auto.marker";
     private static final String AUTO_MARKER_PERSIST = "m3-persist.marker";
     private static final String AUTO_MARKER_M4 = "m4-auto.marker";
+    private static final String AUTO_MARKER_M5 = "m5-auto.marker";
     private static final int AUTO_ENABLE_AT = 40;
     private static final int AUTO_MOVE_AT = 50;
     private static final int AUTO_SHOT_ON_AT = 80;
@@ -76,6 +80,7 @@ public final class ModularPerspectiveClient {
     private static boolean autoModeM3;
     private static boolean autoModePersist;
     private static boolean autoModeM4;
+    private static boolean autoModeM5;
     private static boolean autoModeChecked;
     private static double autoMoveStartX;
     private static double autoMoveStartZ;
@@ -83,6 +88,8 @@ public final class ModularPerspectiveClient {
     /** M3 自动验收的阶段机：服务端可能因失焦暂停而延迟发包，按“状态到达”推进而不是固定 tick。 */
     private static int autoPhase;
     private static int autoPhaseTick;
+    /** M5 自动验收期间临时关掉失焦自动暂停，验收结束后还原。 */
+    private static boolean autoSavedPauseOnLostFocus;
 
     private ModularPerspectiveClient() {}
 
@@ -152,6 +159,7 @@ public final class ModularPerspectiveClient {
         }
         ClientPerspective.tick(minecraft);
         CursorController.tick(minecraft);
+        SectionCuller.tick(minecraft);
         runAutoVerification(minecraft);
     }
 
@@ -214,16 +222,21 @@ public final class ModularPerspectiveClient {
             autoModeM3 = new File(minecraft.gameDirectory, AUTO_MARKER_M3).isFile();
             autoModePersist = new File(minecraft.gameDirectory, AUTO_MARKER_PERSIST).isFile();
             autoModeM4 = new File(minecraft.gameDirectory, AUTO_MARKER_M4).isFile();
-            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist || autoModeM4) {
+            autoModeM5 = new File(minecraft.gameDirectory, AUTO_MARKER_M5).isFile();
+            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist || autoModeM4 || autoModeM5) {
                 ModularPerspective.LOGGER.info(
-                        "[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={} M4={}",
-                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist, autoModeM4);
+                        "[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={} M4={} M5={}",
+                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist, autoModeM4, autoModeM5);
             }
         }
-        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist && !autoModeM4) {
+        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist && !autoModeM4 && !autoModeM5) {
             return;
         }
         autoTicks++;
+        if (autoModeM5) {
+            runM5Verification(minecraft);
+            return;
+        }
         if (autoModeM4) {
             runM4Verification(minecraft);
             return;
@@ -396,7 +409,7 @@ public final class ModularPerspectiveClient {
                 ModularPerspective.LOGGER.info("[auto] M4 phase1: top-down + free cursor enabled");
             }
             case 1 -> {
-                if (autoTicks - autoPhaseTick >= 10) {
+                if (autoTicks - autoPhaseTick >= 20) {
                     grabScreenshot(minecraft, "m4-hud.png");
                     ModularPerspective.LOGGER.info("[auto] M4 phase1b: hud screenshot; status={}",
                             ClientHud.debugStatus());
@@ -477,6 +490,79 @@ public final class ModularPerspectiveClient {
     }
 
     /**
+     * M5 剔除自动验收（marker {@code m5-auto.marker}，§16 M5、§11）：
+     * 用命令把玩家埋进实心石头并挖出一个小空腔（相机位于石头里），
+     * 记录 culling 开/关时的隐藏 section 数并各截一张图，然后恢复配置。
+     */
+    private static void runM5Verification(Minecraft minecraft) {
+        if (autoTicks < AUTO_ENABLE_AT) {
+            return;
+        }
+        switch (autoPhase) {
+            case 0 -> {
+                ClientPerspective.setTopDown(true);
+                CursorController.setUnlocked(true);
+                // 验收期间窗口可能失焦：关掉失焦自动暂停，避免服务器停 tick 导致方块更新不同步。
+                autoSavedPauseOnLostFocus = minecraft.options.pauseOnLostFocus;
+                minecraft.options.pauseOnLostFocus = false;
+                runServerCommand(minecraft, "gamemode creative @s");
+                runServerCommand(minecraft, "tp @s 290 ~ 290");
+                autoPhase = 1;
+                autoPhaseTick = autoTicks;
+                ModularPerspective.LOGGER.info("[auto] M5 phase0: preparing scene (pauseOnLostFocus=false)");
+            }
+            case 1 -> {
+                if (autoTicks - autoPhaseTick >= 20) {
+                    if (minecraft.player != null) {
+                        minecraft.player.setYRot(0.0F);
+                        minecraft.player.setXRot(0.0F);
+                    }
+                    BlockPos base = minecraft.player.blockPosition();
+                    int cleared = clearSceneArea(minecraft, base);
+                    int built = buildStoneWall(minecraft, base);
+                    autoPhase = 2;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M5 phase1: scene at {} (cleared {} blocks, wall {} blocks)", base, cleared, built);
+                }
+            }
+            case 2 -> {
+                if (autoTicks - autoPhaseTick >= 20) {
+                    grabScreenshot(minecraft, "m5-culled.png");
+                    ModularPerspective.LOGGER.info("[auto] M5 phase2 (culled): culling={} hidden={} rays={}",
+                            SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast());
+                    Config.CULLING_ENABLED.set(false);
+                    SectionCuller.invalidate();
+                    autoPhase = 3;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 3 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    grabScreenshot(minecraft, "m5-off.png");
+                    ModularPerspective.LOGGER.info("[auto] M5 phase3 (culling off): culling={} hidden={} rays={}",
+                            SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast());
+                    Config.CULLING_ENABLED.set(true);
+                    SectionCuller.invalidate();
+                    autoPhase = 4;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 4 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
+                    ModularPerspective.LOGGER.info("[auto] M5 verification finished: culling={} hidden={} rays={}",
+                            SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast());
+                    autoPhase = 5;
+                }
+            }
+            default -> {
+                // 完成：不再动作。
+            }
+        }
+    }
+
+    /**
      * 退出后检查 playerdata 里的 attachment 是否落盘。
      */
     private static void runPersistVerification(Minecraft minecraft) {
@@ -494,6 +580,55 @@ public final class ModularPerspectiveClient {
             // vanilla 的 chunk tracker 会抛 ArrayIndexOutOfBoundsException（已实测，非本模组逻辑）。
             ModularPerspective.LOGGER.info("[auto] M3 persist: saved, manual kill expected");
         }
+    }
+
+    /**
+     * 把玩家周围 21×21 的地面重置为草方块、上方 9 格清成空气（仅客户端方块）。
+     *
+     * <p>开发期场景清理：之前的自动验收可能把石头留在存档里，客户端清一遍保证截图可判读。
+     *
+     * @return 清理/重置的方块数
+     */
+    private static int clearSceneArea(Minecraft minecraft, BlockPos base) {
+        if (minecraft.level == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int dx = -10; dx <= 10; dx++) {
+            for (int dz = -10; dz <= 10; dz++) {
+                minecraft.level.setBlock(base.offset(dx, -1, dz), Blocks.GRASS_BLOCK.defaultBlockState(), 3);
+                count++;
+                for (int dy = 0; dy <= 8; dy++) {
+                    minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.AIR.defaultBlockState(), 3);
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 在相机与玩家之间搭一堵 7×8×2 的石墙（仅客户端方块，开发期剔除验收用）。
+     *
+     * <p>相机在玩家身后约 4.24 格（pitch=45°、distance=6），墙放在 z-4..z-3，正好横在视线中间：
+     * 不剔除时应看到石墙，截面级剔除生效后石墙所在 section 被隐藏、应重新看到玩家。
+     *
+     * @return 放置的方块数
+     */
+    private static int buildStoneWall(Minecraft minecraft, BlockPos base) {
+        if (minecraft.level == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dy = 0; dy <= 7; dy++) {
+                for (int dz = -4; dz <= -3; dz++) {
+                    minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     /** 以 OP 权限在集成服务器上执行命令（仅开发期自动验收用；权限 4 绕过单人作弊开关）。 */

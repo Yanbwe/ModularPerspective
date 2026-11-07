@@ -12,6 +12,7 @@ import org.yanbwe.modularperspective.api.hud.HudContext;
 import org.yanbwe.modularperspective.api.hud.HudLayout;
 import org.yanbwe.modularperspective.api.hud.HudWidget;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
+import org.yanbwe.modularperspective.client.cull.SectionCuller;
 
 /**
  * 调试覆盖层（docs/design.md §10.2、§16 M4）：显示相机/仲裁/策略状态与剔除统计占位。
@@ -102,7 +103,8 @@ public final class DebugHudWidget implements HudWidget {
         lines.add(String.format("policy req=%s sug=%s ortho=%s max=%d",
                 policy.allowRequire(), policy.allowSuggest(), policy.allowOrthographic(),
                 policy.maxDirectives()));
-        lines.add("culling: M5 未接线（隐藏 section 0）");
+        lines.add("culling: " + (SectionCuller.isCulling() ? "on" : "off")
+                + " hidden=" + SectionCuller.hiddenCount() + " rays=" + SectionCuller.raysCast());
         lines.add("HUD: " + ClientHud.widgetCount() + " widget(s)  [点击左上胶囊切换本层]");
         return lines;
     }
