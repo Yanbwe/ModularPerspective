@@ -137,7 +137,7 @@ public final class BlockCuller {
                 break;
             }
             rays++;
-            carveRay(level, camera, target, minY, RoomScanner.isIndoor() ? Long.MIN_VALUE : playerSection);
+            carveRay(level, camera, target, minY, RoomScanner.get().isIndoor() ? Long.MIN_VALUE : playerSection);
         }
 
         // 只把“状态变化”的方块所在 section 标脏：静止时不会反复重建。
@@ -192,14 +192,14 @@ public final class BlockCuller {
             if (NEXT_CULLED.contains(key) || !visited.add(key)) {
                 continue;
             }
-            if (center.getY() < minY || SectionPos.asLong(center) == playerSection) {
+            if (center.getY() < minY || SectionPos.asLong(center) == playerSection || RoomScanner.get().test(center) == RoomScanner.get().KEEP) {
                 continue;
             }
             BlockState state = level.getBlockState(center);
             if (!state.isSolidRender(level, center)) {
                 continue;
             }
-            if (!floodCarveShape(level, center, minY, playerSection, visited, RoomScanner.isIndoor())) {
+            if (!floodCarveShape(level, center, minY, playerSection, visited, RoomScanner.get().isIndoor())) {
                 carveTunnel(level, center);
             }
             if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
@@ -219,7 +219,7 @@ public final class BlockCuller {
     private static boolean floodCarveShape(Level level, BlockPos start, int minY, long playerSection, LongOpenHashSet visited, boolean shellOnly) {
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
         java.util.List<BlockPos> collected = new java.util.ArrayList<>();
-        if (!shellOnly || RoomScanner.isShell(start)) {
+        if (!shellOnly || RoomScanner.get().isShell(start)) {
             collected.add(start);
         }
         queue.add(start);
@@ -232,7 +232,7 @@ public final class BlockCuller {
             if (++visitedCount > visitedCap) {
                 return false;
             }
-            if (pos.getY() < minY || SectionPos.asLong(pos) == playerSection) {
+            if (pos.getY() < minY || SectionPos.asLong(pos) == playerSection || RoomScanner.get().test(pos) == RoomScanner.get().KEEP) {
                 continue;
             }
             for (int axis = 0; axis < 3; axis++) {
@@ -250,7 +250,7 @@ public final class BlockCuller {
                     if (!visited.add(neighborKey)) {
                         continue;
                     }
-                    if (neighbor.getY() < minY || SectionPos.asLong(neighbor) == playerSection) {
+                    if (neighbor.getY() < minY || SectionPos.asLong(neighbor) == playerSection || RoomScanner.get().test(neighbor) == RoomScanner.get().KEEP) {
                         continue;
                     }
                     double dx = neighbor.getX() + 0.5D - lastCamera.x;
@@ -263,7 +263,7 @@ public final class BlockCuller {
                     if (!state.isSolidRender(level, neighbor)) {
                         continue;
                     }
-                    boolean include = !shellOnly || RoomScanner.isShell(neighbor);
+                    boolean include = !shellOnly || RoomScanner.get().isShell(neighbor);
                     if (include) {
                         collected.add(neighbor);
                         if (collected.size() > MAX_SHAPE_BLOCKS) {

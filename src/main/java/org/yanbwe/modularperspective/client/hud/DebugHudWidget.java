@@ -115,7 +115,7 @@ public final class DebugHudWidget implements HudWidget {
                     + " scan=" + SectionCuller.lastScanMicros() + "us");
             lines.add("filter=" + SectionCuller.lastFilterMicros() + "us/" + SectionCuller.maxFilterMicros() + "us");
         }
-        lines.add("room: " + (RoomScanner.isIndoor() ? "indoor" : "outdoor") + " air=" + RoomScanner.airCount() + " shell=" + RoomScanner.shellCount());
+        lines.add("room: " + (RoomScanner.get().isIndoor() ? "indoor" : "outdoor") + " roof=" + RoomScanner.get().roofColumnCount() + " wall=" + RoomScanner.get().wallColumnCount() + " sky=" + RoomScanner.get().openSkyColumnCount());
         lines.add("HUD: " + ClientHud.widgetCount() + " widget(s)  [点击左上胶囊切换本层]");
         return lines;
     }

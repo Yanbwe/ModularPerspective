@@ -32,11 +32,9 @@ public final class CullingGhostRenderer {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) {
             return;
         }
-        if (!Config.CULLING_GHOST.get() || !BlockCuller.isCulling()) {
-            return;
-        }
-        var culled = BlockCuller.culledBlocks();
-        if (culled.isEmpty()) {
+        boolean blockCulling = BlockCuller.isCulling() && !BlockCuller.culledBlocks().isEmpty();
+        boolean roomCulling = RoomScanner.get().isIndoor();
+        if (!Config.CULLING_GHOST.get() || (!blockCulling && !roomCulling)) {
             return;
         }
 
@@ -47,20 +45,37 @@ public final class CullingGhostRenderer {
         Vec3 camera = event.getCamera().getPosition();
         double maxDistanceSq = MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE;
 
-        LongIterator iterator = culled.iterator();
-        while (iterator.hasNext()) {
-            BlockPos pos = BlockPos.of(iterator.nextLong());
-            double dx = pos.getX() + 0.5D - camera.x;
-            double dy = pos.getY() + 0.5D - camera.y;
-            double dz = pos.getZ() + 0.5D - camera.z;
-            if (dx * dx + dy * dy + dz * dz > maxDistanceSq) {
-                continue;
+        if (blockCulling) {
+            LongIterator iterator = BlockCuller.culledBlocks().iterator();
+            while (iterator.hasNext()) {
+                BlockPos pos = BlockPos.of(iterator.nextLong());
+                drawBox(poseStack, consumer, camera, pos, maxDistanceSq);
             }
-            poseStack.pushPose();
-            poseStack.translate(pos.getX() - camera.x, pos.getY() - camera.y, pos.getZ() - camera.z);
-            LevelRenderer.renderLineBox(poseStack, consumer, new AABB(0.0D, 0.0D, 0.0D, 1.0D, 1.0D, 1.0D), RED, GREEN, BLUE, ALPHA);
-            poseStack.popPose();
+        }
+        if (roomCulling) {
+            BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+            final int[] budget = {MAX_ROOM_BOXES};
+            RoomScanner.get().forEachCulledBlock(pos -> {
+                if (budget[0]-- <= 0) {
+                    return;
+                }
+                drawBox(poseStack, consumer, camera, cursor.set(pos.getX(), pos.getY(), pos.getZ()), maxDistanceSq);
+            });
         }
         buffers.endBatch(RenderType.lines());
+    }
+    private static final int MAX_ROOM_BOXES = 2048;
+
+    private static void drawBox(PoseStack poseStack, VertexConsumer consumer, Vec3 camera, BlockPos pos, double maxDistanceSq) {
+        double dx = pos.getX() + 0.5D - camera.x;
+        double dy = pos.getY() + 0.5D - camera.y;
+        double dz = pos.getZ() + 0.5D - camera.z;
+        if (dx * dx + dy * dy + dz * dz > maxDistanceSq) {
+            return;
+        }
+        poseStack.pushPose();
+        poseStack.translate(pos.getX() - camera.x, pos.getY() - camera.y, pos.getZ() - camera.z);
+        LevelRenderer.renderLineBox(poseStack, consumer, new AABB(0.0D, 0.0D, 0.0D, 1.0D, 1.0D, 1.0D), RED, GREEN, BLUE, ALPHA);
+        poseStack.popPose();
     }
 }

@@ -165,7 +165,7 @@ public final class ModularPerspectiveClient {
         }
         ClientPerspective.tick(minecraft);
         CursorController.tick(minecraft);
-        RoomScanner.tick(minecraft);
+        RoomScanner.get().tick(minecraft);
         SectionCuller.tick(minecraft);
         BlockCuller.tick(minecraft);
         runAutoVerification(minecraft);
@@ -658,7 +658,7 @@ public final class ModularPerspectiveClient {
                     BlockPos base = minecraft.player.blockPosition();
                     clearSceneArea(minecraft, base);
                     int room = buildRoom(minecraft, base);
-                    RoomScanner.invalidate();
+                    RoomScanner.get().invalidate();
                     autoPhase = 4;
                     autoPhaseTick = autoTicks;
                     ModularPerspective.LOGGER.info("[auto] M6 phase3: room built ({} blocks)", room);
@@ -666,23 +666,23 @@ public final class ModularPerspectiveClient {
             }
             case 4 -> {
                 if (autoTicks - autoPhaseTick >= 25) {
-                    RoomScanner.invalidate();
+                    RoomScanner.get().invalidate();
                     grabScreenshot(minecraft, "m6-room-indoor.png");
                     ModularPerspective.LOGGER.info("[auto] M6 room-indoor: type={} air={} shell={} culling={} blocks={}",
-                            RoomScanner.type(), RoomScanner.airCount(), RoomScanner.shellCount(),
+                            RoomScanner.get().type(), RoomScanner.get().airCount(), RoomScanner.get().shellCount(),
                             BlockCuller.isCulling(), BlockCuller.culledCount());
                     clearSceneArea(minecraft, minecraft.player.blockPosition());
-                    RoomScanner.invalidate();
+                    RoomScanner.get().invalidate();
                     autoPhase = 5;
                     autoPhaseTick = autoTicks;
                 }
             }
             case 5 -> {
                 if (autoTicks - autoPhaseTick >= 25) {
-                    RoomScanner.invalidate();
+                    RoomScanner.get().invalidate();
                     grabScreenshot(minecraft, "m6-room-outdoor.png");
                     ModularPerspective.LOGGER.info("[auto] M6 room-outdoor: type={} air={} shell={} culling={} blocks={}",
-                            RoomScanner.type(), RoomScanner.airCount(), RoomScanner.shellCount(),
+                            RoomScanner.get().type(), RoomScanner.get().airCount(), RoomScanner.get().shellCount(),
                             BlockCuller.isCulling(), BlockCuller.culledCount());
                     minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
                     autoPhase = 6;
