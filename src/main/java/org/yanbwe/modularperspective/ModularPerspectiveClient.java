@@ -51,6 +51,7 @@ public final class ModularPerspectiveClient {
     private static final String AUTO_MARKER_M2 = "m2-auto.marker";
     private static final String AUTO_MARKER_MOVE = "move-auto.marker";
     private static final String AUTO_MARKER_M3 = "m3-auto.marker";
+    private static final String AUTO_MARKER_PERSIST = "m3-persist.marker";
     private static final int AUTO_ENABLE_AT = 40;
     private static final int AUTO_MOVE_AT = 50;
     private static final int AUTO_SHOT_ON_AT = 80;
@@ -64,6 +65,7 @@ public final class ModularPerspectiveClient {
     private static boolean autoModeM2;
     private static boolean autoModeMove;
     private static boolean autoModeM3;
+    private static boolean autoModePersist;
     private static boolean autoModeChecked;
     private static double autoMoveStartX;
     private static double autoMoveStartZ;
@@ -173,15 +175,20 @@ public final class ModularPerspectiveClient {
             autoModeM2 = new File(minecraft.gameDirectory, AUTO_MARKER_M2).isFile();
             autoModeMove = new File(minecraft.gameDirectory, AUTO_MARKER_MOVE).isFile();
             autoModeM3 = new File(minecraft.gameDirectory, AUTO_MARKER_M3).isFile();
-            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3) {
-                ModularPerspective.LOGGER.info("[auto] verification mode: M1={} M2={} MOVE={} M3={}",
-                        autoModeM1, autoModeM2, autoModeMove, autoModeM3);
+            autoModePersist = new File(minecraft.gameDirectory, AUTO_MARKER_PERSIST).isFile();
+            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist) {
+                ModularPerspective.LOGGER.info("[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={}",
+                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist);
             }
         }
-        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3) {
+        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist) {
             return;
         }
         autoTicks++;
+        if (autoModePersist) {
+            runPersistVerification(minecraft);
+            return;
+        }
         if (autoModeM3) {
             runM3Verification(minecraft);
             return;
@@ -234,13 +241,16 @@ public final class ModularPerspectiveClient {
     private static void runM3Verification(Minecraft minecraft) {
         if (autoTicks == AUTO_ENABLE_AT) {
             ClientPerspective.setTopDown(false);
-            runServerCommand(minecraft, "perspective camera @s 0 45 200");
-            ModularPerspective.LOGGER.info("[auto] M3 camera command sent; topDown={} ortho={}",
+            runServerCommand(minecraft, "perspective preset @s top-down 200");
+            ModularPerspective.LOGGER.info("[auto] M3 preset command sent; topDown={} ortho={}",
                     ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
         } else if (autoTicks == AUTO_SHOT_ON_AT) {
-            grabScreenshot(minecraft, "m3-server.png");
-            ModularPerspective.LOGGER.info("[auto] M3 after snapshot: topDown={} ortho={}",
+            grabScreenshot(minecraft, "m3-preset.png");
+            ModularPerspective.LOGGER.info("[auto] M3 after preset snapshot: topDown={} ortho={}",
                     ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+        } else if (autoTicks == AUTO_MOVE_STOP_AT) {
+            runServerCommand(minecraft, "perspective lock @s rotate off");
+            ModularPerspective.LOGGER.info("[auto] M3 lock command sent");
         } else if (autoTicks == AUTO_DISABLE_AT) {
             runServerCommand(minecraft, "perspective clear @s");
             ModularPerspective.LOGGER.info("[auto] M3 clear command sent");
@@ -248,6 +258,27 @@ public final class ModularPerspectiveClient {
             grabScreenshot(minecraft, "m3-cleared.png");
             ModularPerspective.LOGGER.info("[auto] M3 verification finished (topDown={} ortho={})",
                     ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+        }
+    }
+
+    /**
+     * 持久化验收（marker {@code m3-persist.marker}）：推一条长指令 → saveEverything → stopServer，
+     * 退出后检查 playerdata 里的 attachment 是否落盘。
+     */
+    private static void runPersistVerification(Minecraft minecraft) {
+        if (autoTicks == AUTO_ENABLE_AT) {
+            runServerCommand(minecraft, "perspective camera @s 0 45 2400");
+            ModularPerspective.LOGGER.info("[auto] M3 persist: camera command sent");
+        } else if (autoTicks == AUTO_SHOT_ON_AT) {
+            net.minecraft.server.MinecraftServer server = minecraft.getSingleplayerServer();
+            if (server != null) {
+                boolean saved = server.saveEverything(true, true, true);
+                ModularPerspective.LOGGER.info("[auto] M3 persist: saveEverything={}", saved);
+            }
+        } else if (autoTicks == AUTO_DISABLE_AT) {
+            // 不在 render thread 上调 stopServer()：会从 ServerChunkCache.tick 里重入停止，
+            // vanilla 的 chunk tracker 会抛 ArrayIndexOutOfBoundsException（已实测，非本模组逻辑）。
+            ModularPerspective.LOGGER.info("[auto] M3 persist: saved, manual kill expected");
         }
     }
 

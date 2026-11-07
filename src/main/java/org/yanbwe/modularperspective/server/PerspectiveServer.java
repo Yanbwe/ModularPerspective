@@ -2,10 +2,7 @@ package org.yanbwe.modularperspective.server;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
-import java.util.UUID;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.neoforge.event.entity.player.PlayerEvent;
@@ -15,6 +12,7 @@ import org.yanbwe.modularperspective.api.camera.CameraChannel;
 import org.yanbwe.modularperspective.api.camera.CameraDirective;
 import org.yanbwe.modularperspective.api.camera.CameraTarget;
 import org.yanbwe.modularperspective.api.camera.Easing;
+import org.yanbwe.modularperspective.api.camera.EndReason;
 import org.yanbwe.modularperspective.api.camera.Enforcement;
 import org.yanbwe.modularperspective.api.camera.PerspectivePolicy;
 import org.yanbwe.modularperspective.api.camera.Projection;
@@ -25,28 +23,16 @@ import org.yanbwe.modularperspective.network.PerspectiveNetwork;
 /**
  * 服务端指令栈与快照（docs/design.md §6.1、§6.2、§7.3）。
  *
- * <p>M3 首版用内存 map 按玩家 UUID 保存（等价于 attachment 的最小实现；持久化与 copyOnDeath 的
- * 序列化在 M4 接入，届时改成 {@code AttachmentType} 并补 Codec）。变更有两类触发：
- * 每台服 tick 检查到期，以及命令/API 显式修改时置 {@code dirty}；每个 tick 末最多发一次全量快照，
- * revision 只在真正发包时 +1（§7.3）。
+ * <p>状态以玩家 {@code AttachmentType} 形式持久化（{@link PerspectiveAttachment}），随存档保存、
+ * 死亡时按 {@code copyOnDeath} 复制后再由 {@link #onPlayerRespawn} 执行结束规则。
+ * 变更有两类触发：每台服 tick 检查到期，以及命令/API 显式修改时置 {@code dirty}；
+ * 每个 tick 末最多发一次全量快照，revision 只在真正发包时 +1（§7.3）。
  */
 public final class PerspectiveServer {
-    private static final Map<UUID, State> STATES = new HashMap<>();
-
     private PerspectiveServer() {}
 
-    /** 每个玩家一条栈 + revision/seq 分配器。 */
-    private static final class State {
-        final List<CameraDirective> directives = new ArrayList<>();
-        PerspectivePolicy policy = PerspectivePolicy.DEFAULT;
-        boolean hudVisible = true;
-        long revision;
-        long nextSeq;
-        boolean dirty;
-    }
-
-    private static State state(ServerPlayer player) {
-        return STATES.computeIfAbsent(player.getUUID(), ignored -> new State());
+    private static PerspectiveAttachment state(ServerPlayer player) {
+        return player.getData(PerspectiveAttachments.PERSPECTIVE);
     }
 
     // ------------------------------------------------------------------ 门面
@@ -55,47 +41,65 @@ public final class PerspectiveServer {
     public static CameraDirective push(ServerPlayer target, String id, int priority, Enforcement enforcement,
                                        EnumSet<CameraChannel> channels, CameraTarget value,
                                        int durationTicks, boolean requiresAck, boolean keepOnDeath) {
-        State state = state(target);
-        validate(state.policy, enforcement, value);
-        long seq = ++state.nextSeq;
+        PerspectiveAttachment state = state(target);
+        validate(state.policy(), enforcement, value);
+        long seq = state.allocateSeq();
         long now = target.serverLevel().getGameTime();
         CameraDirective directive = new CameraDirective(id, target.getUUID(), seq, priority, enforcement,
                 channels, value, 0.0F, 0.0F, Easing.LINEAR, durationTicks, requiresAck, keepOnDeath, now);
-        state.directives.removeIf(existing -> existing.id().equals(id));
-        state.directives.add(directive);
-        state.dirty = true;
+        state.directives().removeIf(existing -> existing.id().equals(id));
+        state.directives().add(directive);
+        state.markDirty();
         return directive;
     }
 
     public static boolean remove(ServerPlayer target, String id) {
-        State state = state(target);
-        boolean removed = state.directives.removeIf(directive -> directive.id().equals(id));
+        PerspectiveAttachment state = state(target);
+        boolean removed = state.directives().removeIf(directive -> directive.id().equals(id));
         if (removed) {
-            state.dirty = true;
+            state.markDirty();
         }
         return removed;
     }
 
     public static int clear(ServerPlayer target) {
-        State state = state(target);
-        int size = state.directives.size();
-        state.directives.clear();
+        PerspectiveAttachment state = state(target);
+        int size = state.directives().size();
+        state.directives().clear();
         if (size > 0) {
-            state.dirty = true;
+            state.markDirty();
         }
         return size;
     }
 
+    /** 由命令层修改已有指令（如 lock 位）时使用：同 id 替换并置 dirty。 */
+    public static void replace(ServerPlayer target, CameraDirective directive) {
+        PerspectiveAttachment state = state(target);
+        state.directives().removeIf(existing -> existing.id().equals(directive.id()));
+        state.directives().add(directive);
+        state.markDirty();
+    }
+
+    /** 供命令层分配 seq（与 push 使用同一个计数器）。 */
+    public static long nextSeq(ServerPlayer target) {
+        return state(target).allocateSeq();
+    }
+
+    /** 设置服务端策略（§6.5；命令/外部 API 用）。 */
+    public static void setPolicy(ServerPlayer target, PerspectivePolicy policy) {
+        state(target).setPolicy(policy);
+    }
+
     public static List<CameraDirective> directives(ServerPlayer target) {
-        return List.copyOf(state(target).directives);
+        return List.copyOf(state(target).directives());
     }
 
     public static long revision(ServerPlayer target) {
-        return state(target).revision;
+        return state(target).revision();
     }
 
     public static PerspectivePolicy policy(ServerPlayer target) {
-        return state(target).policy;
+        return state(target).policy();
     }
 
     // ------------------------------------------------------------------ tick 与事件
@@ -105,31 +109,31 @@ public final class PerspectiveServer {
         MinecraftServer server = event.getServer();
         long now = server.overworld().getGameTime();
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            State state = STATES.get(player.getUUID());
-            if (state == null) {
-                continue;
+            PerspectiveAttachment state = state(player);
+            boolean changed = state.directives().removeIf(directive -> directive.expired(now));
+            if (changed) {
+                state.markDirty();
             }
-            boolean changed = state.directives.removeIf(directive -> directive.expired(now));
-            if (changed || state.dirty) {
-                state.dirty = false;
+            if (state.dirty()) {
+                state.clearDirty();
                 sendSnapshot(player, state);
             }
         }
     }
 
-    private static void sendSnapshot(ServerPlayer player, State state) {
-        state.revision++;
-        CameraSnapshotPayload payload = new CameraSnapshotPayload(state.revision, state.hudVisible,
-                List.copyOf(state.directives));
+    private static void sendSnapshot(ServerPlayer player, PerspectiveAttachment state) {
+        state.setRevision(state.revision() + 1);
+        CameraSnapshotPayload payload = new CameraSnapshotPayload(state.revision(), state.hudVisible(),
+                List.copyOf(state.directives()));
         PerspectiveNetwork.sendSnapshot(player, payload);
         ModularPerspective.LOGGER.info("[perspective] snapshot sent to {} revision={} directives={}",
-                player.getGameProfile().getName(), state.revision, payload.directives().size());
+                player.getGameProfile().getName(), state.revision(), payload.directives().size());
     }
 
     /** 登录/重生/换维度后强制补发全量快照（§7.3 发送时机）。 */
     public static void sendFullSnapshot(ServerPlayer player) {
-        State state = state(player);
-        state.dirty = false;
+        PerspectiveAttachment state = state(player);
+        state.clearDirty();
         sendSnapshot(player, state);
     }
 
@@ -139,16 +143,38 @@ public final class PerspectiveServer {
         }
     }
 
+    /**
+     * 登出不再清状态：{@link PerspectiveAttachment} 会随玩家存档保存（§6.1）。
+     * 这里只清掉“脏”标记，避免下个 tick 对离线玩家发快照。
+     */
     public static void onPlayerLoggedOut(PlayerEvent.PlayerLoggedOutEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
-            STATES.remove(player.getUUID());
+            state(player).clearDirty();
         }
     }
 
+    /** 重生：keepOnDeath=false 的指令以 OWNER_DIED 结束，然后补发全量快照（§6.1）。 */
     public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
-        if (event.getEntity() instanceof ServerPlayer player) {
-            sendFullSnapshot(player);
+        if (!(event.getEntity() instanceof ServerPlayer player)) {
+            return;
         }
+        PerspectiveAttachment state = state(player);
+        List<CameraDirective> ended = new ArrayList<>();
+        state.directives().removeIf(directive -> {
+            if (directive.keepOnDeath()) {
+                return false;
+            }
+            ended.add(directive);
+            return true;
+        });
+        for (CameraDirective directive : ended) {
+            ModularPerspective.LOGGER.info("[perspective] directive {} ended ({}) after respawn of {}",
+                    directive.id(), EndReason.OWNER_DIED, player.getGameProfile().getName());
+        }
+        if (!ended.isEmpty()) {
+            state.markDirty();
+        }
+        sendFullSnapshot(player);
     }
 
     public static void onPlayerChangedDimension(PlayerEvent.PlayerChangedDimensionEvent event) {
@@ -159,11 +185,8 @@ public final class PerspectiveServer {
 
     /** 客户端到位回执：只校验 id/seq 仍存在，不修改栈（§7.4）。 */
     public static void onArrived(ServerPlayer player, CameraArrivedPayload payload) {
-        State state = STATES.get(player.getUUID());
-        if (state == null) {
-            return;
-        }
-        boolean known = state.directives.stream()
+        PerspectiveAttachment state = state(player);
+        boolean known = state.directives().stream()
                 .anyMatch(directive -> directive.id().equals(payload.id()) && directive.seq() == payload.seq());
         if (!known) {
             ModularPerspective.LOGGER.debug("[perspective] arrived for unknown directive {} seq={}", payload.id(), payload.seq());

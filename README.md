@@ -34,8 +34,8 @@ PowerShell 下：
 
 ## 命令
 
-`/perspective camera <targets> <yaw> <pitch> [duration]`、`/perspective clear <targets>`、`/perspective query <targets>`，权限等级 ≥2。
-M3 首版已接线：服务端栈 + 全量快照下发（登录/重生/换维度补发），`camera` 的落位是眼睛沿视线后退 6 格的正交俯视；完整设计语法与 M3 剩余项见 docs §12 / §16。
+`/perspective camera <targets> <yaw> <pitch> [duration]`、`/perspective preset <targets> <top-down|reset> [duration]`、`/perspective lock <targets> <rotate|zoom|move|all> <on|off>`、`/perspective clear <targets>`、`/perspective query <targets>`，权限等级 ≥2。
+服务端栈 + 全量快照下发（登录/重生/换维度补发）+ attachment 持久化（随玩家存档保存、死亡按 `keepOnDeath` 清理）已接线；`camera`/`preset top-down` 的落位是眼睛沿视线后退 6 格的正交俯视。完整设计语法与 M3 剩余项见 docs §12 / §16。
 
 ## 目录
 
@@ -49,8 +49,10 @@ src/main/java/org/yanbwe/modularperspective/
   client/input/                    伪解锁光标状态机（CursorController）
   client/PerspectiveClientNetwork  客户端 payload 接收（快照 → CameraStack）
   network/                         payload 定义与编解码（CameraSnapshotPayload / CameraArrivedPayload / PerspectiveNetwork）
-  server/PerspectiveCommand.java   /perspective 命令（M3: camera / clear / query）
-  server/PerspectiveServer.java    服务端指令栈与全量快照（M3 首版为内存栈，M4 换 attachment）
+  server/PerspectiveCommand.java   /perspective 命令（camera / preset / lock / clear / query）
+  server/PerspectiveServer.java    服务端指令栈与全量快照（attachment 持久化）
+  server/PerspectiveAttachments.java   相机栈的 AttachmentType 注册
+  server/PerspectiveAttachment.java    玩家持久化状态（Codec）
   mixin/                           相机/渲染/输入注入点
 src/test/java/org/yanbwe/modularperspective/   纯逻辑单测（JUnit 5）
 ```

@@ -9,6 +9,7 @@ import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import org.slf4j.Logger;
 import org.yanbwe.modularperspective.network.PerspectiveNetwork;
+import org.yanbwe.modularperspective.server.PerspectiveAttachments;
 import org.yanbwe.modularperspective.server.PerspectiveCommand;
 import org.yanbwe.modularperspective.server.PerspectiveServer;
 
@@ -39,6 +40,9 @@ public final class ModularPerspective {
 
         // 命令注册在 game bus（RegisterCommandsEvent，§12）。
         NeoForge.EVENT_BUS.addListener(PerspectiveCommand::register);
+
+        // 服务端相机栈的 attachment 类型必须在 mod bus 注册（§6.1）。
+        PerspectiveAttachments.register(modEventBus);
 
         // 网络：payload 注册在 mod bus；服务端 tick/玩家事件在 game bus（§7.1、§7.3）。
         modEventBus.addListener(PerspectiveNetwork::registerCommon);
