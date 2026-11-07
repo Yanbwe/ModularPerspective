@@ -164,6 +164,9 @@ var generateModMetadata = tasks.register("generateModMetadata", ProcessResources
             mod_version            : mod_version,
     ]
     inputs.properties replaceProperties
+    // 必须显式指定 UTF-8：否则在 JDK 17（本机默认 JAVA_HOME）下会按平台编码 GBK 读取模板，
+    // 生成的 neoforge.mods.toml 变成乱码，FML 解析 TOML 失败（"is not a valid mod file"）。
+    filteringCharset = 'UTF-8'
     expand replaceProperties
     from "src/main/templates"
     into "build/generated/sources/modMetadata"

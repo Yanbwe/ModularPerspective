@@ -5,7 +5,7 @@
 
 - 设计文档：`docs/design.md`（本地文档，**不入 git**；v0.3）
 - 许可证：GPL-3.0
-- 当前状态：M0 骨架（入口 / 配置 / 命令占位 / Mixin 占位 / 单测），功能从 M1 起逐步落地
+- 当前状态：M0 骨架 + M1 相机核心 + M2 输入链（正交俯视、F5 第三人称、伪解锁光标、中键拖拽/滚轮、Home 吸附、WASD 相对屏幕）
 
 ## 环境
 
@@ -17,12 +17,14 @@
 | ModDevGradle | 2.0.141 |
 | Gradle | 9.2.1（wrapper） |
 
-## 构建
+## 构建与运行
 
-```bash
-./gradlew build test      # 编译 + 单测
-./gradlew runClient       # 客户端开发运行
-./gradlew runServer       # 服务端开发运行（--nogui）
+PowerShell 下：
+
+```powershell
+.\gradlew.bat build test    # 编译 + 单测
+.\gradlew.bat runClient     # 客户端开发运行
+.\gradlew.bat runServer     # 服务端开发运行（--nogui）
 ```
 
 ## 配置
@@ -39,9 +41,12 @@
 ```
 src/main/java/org/yanbwe/modularperspective/
   ModularPerspective.java          主入口（common）
-  ModularPerspectiveClient.java    客户端入口（EventBusSubscriber）
+  ModularPerspectiveClient.java    客户端入口（mod bus 监听器、键位、HUD 层、自动验收）
   Config.java                      COMMON/CLIENT/SERVER 配置
-  api/camera/                      公开类型：通道、强制级别、结束原因、缓动、投影、客户端策略
+  api/camera/                      公开类型：通道、指令、目标、快照、锁、强制级别、结束原因、缓动、投影、策略
+  client/camera/                   相机栈与客户端预设（CameraStack / ClientPerspective）
+  client/input/                    伪解锁光标状态机（CursorController）
   server/PerspectiveCommand.java   命令骨架
-  mixin/CameraMixin.java           相机落位注入点（M1 填充）
+  mixin/                           相机/渲染/输入注入点
+src/test/java/org/yanbwe/modularperspective/   纯逻辑单测（JUnit 5）
 ```

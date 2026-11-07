@@ -42,6 +42,15 @@ public final class CursorController {
 
     private static boolean unlocked;
     private static boolean applied;
+    /**
+     * 是否真正修改过原版鼠标状态（伪解锁生效过）。
+     *
+     * <p>修复 m02302：主菜单从未进入世界时 {@code reset()} 每 tick 都会被调用，之前它会无条件
+     * {@code grabMouse()}——把光标隐藏并居中，还会 {@code setScreen(null)} 关掉标题界面，导致
+     * “鼠标被死死拉回窗口中间、只能 Alt+F4”。现在只有确实伪解锁过才恢复，且恢复时若不在游戏内
+     * （level==null 或 Screen 打开）只保证普通光标，绝不抢抓。
+     */
+    private static boolean forced;
     private static boolean dragging;
     private static double dragStartX;
     private static double dragStartY;
@@ -177,17 +186,35 @@ public final class CursorController {
         ((MouseHandlerAccessor) mouseHandler).modularperspective$setMouseGrabbed(true);
         mouseHandler.setIgnoreFirstMove();
         ((MinecraftAccessor) minecraft).modularperspective$setMissTime(10_000);
+        forced = true;
 
         Window window = minecraft.getWindow();
         GLFW.glfwSetCursorPos(window.getWindow(), window.getScreenWidth() / 2.0D, window.getScreenHeight() / 2.0D);
     }
 
+    /**
+     * 恢复原版鼠标状态。只在 {@link #forced} 为 true（确实伪解锁过）时动手；且只有“游戏内且没有 Screen”
+     * 才重新抢抓鼠标——在主菜单/界面里抢抓会隐藏并居中光标、还会 {@code setScreen(null)}（m02302）。
+     */
     private static void restore() {
         applied = false;
+        if (!forced) {
+            dragging = false;
+            return;
+        }
+        forced = false;
         dragging = false;
+
         Minecraft minecraft = Minecraft.getInstance();
         MouseHandler mouseHandler = minecraft.mouseHandler;
         ((MouseHandlerAccessor) mouseHandler).modularperspective$setMouseGrabbed(false);
-        mouseHandler.grabMouse();
+        if (minecraft.level != null && minecraft.screen == null) {
+            mouseHandler.grabMouse();
+        } else {
+            // 主菜单/任意 Screen：保持普通光标，把抓取权交还原版界面逻辑。
+            mouseHandler.releaseMouse();
+        }
+        ModularPerspective.LOGGER.info("[perspective] mouse state restored (level={}, screen={})",
+                minecraft.level != null, minecraft.screen != null);
     }
 }
