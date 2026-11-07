@@ -24,6 +24,7 @@ public final class Config {
     public static final ModConfigSpec.BooleanValue CULLING_ENABLED;
     public static final ModConfigSpec.BooleanValue CULLING_SECTION_APPROXIMATION;
     public static final ModConfigSpec.BooleanValue CULLING_BLOCK_LEVEL;
+    public static final ModConfigSpec.BooleanValue CULLING_GHOST;
     public static final ModConfigSpec.BooleanValue DEBUG_OVERLAY;
 
     static {
@@ -35,6 +36,9 @@ public final class Config {
         CULLING_BLOCK_LEVEL = COMMON_BUILDER
                 .comment("v0.2 方块级剔除：把相机-玩家视线上的实心方块从区块 mesh 中剔除（只影响渲染，不改世界）；开启时 section 级近似自动让位")
                 .define("blockLevel", true);
+        CULLING_GHOST = COMMON_BUILDER
+                .comment("v0.2 方块级剔除时给被剔除方块画半透明线框（幽灵轮廓），避免“墙被挖洞”看起来像渲染错误")
+                .define("ghostOutline", true);
         COMMON_BUILDER.pop();
 
         COMMON_BUILDER.comment("调试输出").push("debug");

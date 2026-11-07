@@ -28,6 +28,7 @@ import org.yanbwe.modularperspective.api.hud.HudRegistry;
 import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
 import org.yanbwe.modularperspective.client.cull.BlockCuller;
+import org.yanbwe.modularperspective.client.cull.CullingGhostRenderer;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
@@ -116,6 +117,7 @@ public final class ModularPerspectiveClient {
         NeoForge.EVENT_BUS.addListener(ModularPerspectiveClient::onMouseButton);
         NeoForge.EVENT_BUS.addListener(ModularPerspectiveClient::onMouseScrolling);
         NeoForge.EVENT_BUS.addListener(ClientPerspective::onComputeFov);
+        NeoForge.EVENT_BUS.addListener(CullingGhostRenderer::onRenderLevelStage);
 
         ModularPerspective.LOGGER.info("[{}] client entry loaded", ModularPerspective.MODID);
     }

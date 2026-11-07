@@ -74,6 +74,11 @@ public final class BlockCuller {
         return culling && !CULLED.isEmpty() && CULLED.contains(blockPos.asLong());
     }
 
+    /** 只读视图：当前被剔除的方块（LongSet 元素是 BlockPos.asLong）。 */
+    public static it.unimi.dsi.fastutil.longs.LongSet culledBlocks() {
+        return it.unimi.dsi.fastutil.longs.LongSets.unmodifiable(CULLED);
+    }
+
     /** 配置/状态变化后强制下一次 tick 重算。 */
     public static void invalidate() {
         lastRefreshTick = Long.MIN_VALUE;
