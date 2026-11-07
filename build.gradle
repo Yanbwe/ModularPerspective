@@ -107,6 +107,11 @@ neoForge {
             sourceSet(sourceSets.main)
         }
     }
+
+    // 注：不使用 ModDevGradle 的 unitTest.enable()。2.0.141 下它会让 test 任务跑在
+    // FML 的 forgejunitdev 启动目标里，普通测试类不在 ModuleClassLoader 的
+    // module/legacy classpath 上（ClassNotFoundException）；M0 的纯逻辑测试
+    // 直接用 Gradle 默认的 JUnit Platform。需要 Minecraft 类的测试再评估。
 }
 
 // Sets up a dependency configuration called 'localRuntime'.
@@ -135,6 +140,10 @@ dependencies {
 
     // Example project dependency using a sister or child project:
     // implementation project(":myproject")
+
+    // JUnit 5（§11.5：纯逻辑单测，不依赖渲染）
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 
     // For more info:
     // http://www.gradle.org/docs/current/userguide/artifact_dependencies_tutorial.html
@@ -181,6 +190,11 @@ publishing {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+}
+
+// Run JUnit 5 tests via the JUnit Platform（M0 起可用；`gradlew build test`）。
+tasks.named('test') {
+    useJUnitPlatform()
 }
 
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.
