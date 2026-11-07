@@ -1,0 +1,13 @@
+{
+  "itemGroup.modularperspective": "Example Mod Tab",
+  "block.modularperspective.example_block": "Example Block",
+  "item.modularperspective.example_item": "Example Item",
+
+  "modularperspective.configuration.title": "Modular Perspective Configs",
+  "modularperspective.configuration.section.modularperspective.common.toml": "Modular Perspective Configs",
+  "modularperspective.configuration.section.modularperspective.common.toml.title": "Modular Perspective Configs",
+  "modularperspective.configuration.items": "Item List",
+  "modularperspective.configuration.logDirtBlock": "Log Dirt Block",
+  "modularperspective.configuration.magicNumberIntroduction": "Magic Number Text",
+  "modularperspective.configuration.magicNumber": "Magic Number"
+}
