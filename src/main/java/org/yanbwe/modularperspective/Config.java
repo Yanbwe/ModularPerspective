@@ -23,14 +23,18 @@ public final class Config {
 
     public static final ModConfigSpec.BooleanValue CULLING_ENABLED;
     public static final ModConfigSpec.BooleanValue CULLING_SECTION_APPROXIMATION;
+    public static final ModConfigSpec.BooleanValue CULLING_BLOCK_LEVEL;
     public static final ModConfigSpec.BooleanValue DEBUG_OVERLAY;
 
     static {
         COMMON_BUILDER.comment("剔除（culling）开关；v0.1 只做 section 级近似，见 docs/design.md §11.2").push("culling");
-        CULLING_ENABLED = COMMON_BUILDER.comment("总开关；关闭后不剔除任何 section").define("enabled", true);
+        CULLING_ENABLED = COMMON_BUILDER.comment("总开关；关闭后不剔除任何方块/section").define("enabled", true);
         CULLING_SECTION_APPROXIMATION = COMMON_BUILDER
                 .comment("v0.1 保持 true：只按 section 判定可见性，不改区块 mesh")
                 .define("sectionApproximation", true);
+        CULLING_BLOCK_LEVEL = COMMON_BUILDER
+                .comment("v0.2 方块级剔除：把相机-玩家视线上的实心方块从区块 mesh 中剔除（只影响渲染，不改世界）；开启时 section 级近似自动让位")
+                .define("blockLevel", true);
         COMMON_BUILDER.pop();
 
         COMMON_BUILDER.comment("调试输出").push("debug");

@@ -12,6 +12,7 @@ import org.yanbwe.modularperspective.api.hud.HudContext;
 import org.yanbwe.modularperspective.api.hud.HudLayout;
 import org.yanbwe.modularperspective.api.hud.HudWidget;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
+import org.yanbwe.modularperspective.client.cull.BlockCuller;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
 
 /**
@@ -87,7 +88,7 @@ public final class DebugHudWidget implements HudWidget {
     private List<String> lines(HudContext ctx) {
         ResolvedCameraState state = ctx.state();
         List<String> lines = new ArrayList<>();
-        lines.add("Modular Perspective M4");
+        lines.add("Modular Perspective M6");
         if (state == null) {
             lines.add("camera: 无指令（原版视角）");
         } else {
@@ -103,10 +104,16 @@ public final class DebugHudWidget implements HudWidget {
         lines.add(String.format("policy req=%s sug=%s ortho=%s max=%d",
                 policy.allowRequire(), policy.allowSuggest(), policy.allowOrthographic(),
                 policy.maxDirectives()));
-        lines.add("cull: " + (SectionCuller.isCulling() ? "on" : "off")
-                + " h=" + SectionCuller.hiddenCount() + " r=" + SectionCuller.raysCast()
-                + " scan=" + SectionCuller.lastScanMicros() + "us/" + SectionCuller.maxScanMicros() + "us");
-        lines.add("filter=" + SectionCuller.lastFilterMicros() + "us/" + SectionCuller.maxFilterMicros() + "us");
+        if (Config.CULLING_BLOCK_LEVEL.get()) {
+            lines.add("cull: block " + (BlockCuller.isCulling() ? "on" : "off")
+                    + " blocks=" + BlockCuller.culledCount() + " r=" + BlockCuller.raysCast()
+                    + " dirty=" + BlockCuller.dirtyPending());
+        } else {
+            lines.add("cull: section " + (SectionCuller.isCulling() ? "on" : "off")
+                    + " h=" + SectionCuller.hiddenCount() + " r=" + SectionCuller.raysCast()
+                    + " scan=" + SectionCuller.lastScanMicros() + "us");
+            lines.add("filter=" + SectionCuller.lastFilterMicros() + "us/" + SectionCuller.maxFilterMicros() + "us");
+        }
         lines.add("HUD: " + ClientHud.widgetCount() + " widget(s)  [点击左上胶囊切换本层]");
         return lines;
     }

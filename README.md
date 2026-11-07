@@ -54,7 +54,7 @@ HudRegistry.register(ResourceLocation.fromNamespaceAndPath("examplemod", "quest_
 
 ## 剔除
 
-v0.1 是 **section 级近似**：每 2 tick 从相机向玩家 hitbox 的 9 个采样点投射射线（步长 0.2 格），命中方块即隐藏其所在 16³ section（跳过玩家所在 section），`LevelRenderer#renderSectionLayer` 只过滤本帧的 section 列表，不改区块 mesh、不重建。配置 `culling.enabled` 可整体关闭；调试覆盖层显示 `hidden`/`rays` 与扫描/过滤耗时。开发期五场景自动验收（平地 / 3×8 墙 / 3×16 墙 / 10×16 墙 / 关闭剔除）实测：扫描最大 83us、过滤最大 28us（预算 2ms / 0.2ms）；剔除开时墙 section 消失、玩家可见，关闭时墙遮挡。尚未移植旧版 DungeonsPerspective 的房间/连通形状剔除（RoomScanner/SightlineScanner），v0.2 再评估。
+v0.2 起默认 **方块级剔除**（`culling.blockLevel=true`）：沿相机→玩家 9 条视线每 0.25 格采样、把周围 1 格内的实心方块从区块 mesh 中剔除（`RenderChunkRegionMixin` 把被剔除方块返回成空气，只影响渲染，不改世界/碰撞），再把状态变化的 section 按 16 个/tick 的预算标脏重建——效果是墙上被挖出一条“视线隧道”看到玩家，而不是整段 section 消失。`culling.blockLevel=false` 时退回 v0.1 的 section 级近似（每 2 tick 射线命中即隐藏整段 16³ section，`renderSectionLayer` 过滤，不改 mesh）。`culling.enabled=false` 两者都关闭。调试覆盖层显示方块/`section` 剔除统计与扫描/过滤耗时。开发期验收：五场景 section 级扫描最大 83us、过滤最大 28us（预算 2ms / 0.2ms）；方块级 10×16 墙实测剔除 48 块、关闭后完整恢复。尚未移植旧版 DungeonsPerspective 的连通形状/房间剔除与幽灵轮廓（v0.2 后续）。
 
 ## 目录
 

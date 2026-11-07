@@ -79,7 +79,8 @@ public final class SectionCuller {
     /** 每客户端 tick 调用（在相机状态更新之后）。 */
     public static void tick(Minecraft minecraft) {
         Level level = minecraft.level;
-        if (!Config.CULLING_ENABLED.get() || level == null || minecraft.player == null || !ClientPerspective.isTopDown()) {
+        if (!Config.CULLING_ENABLED.get() || Config.CULLING_BLOCK_LEVEL.get()
+                || level == null || minecraft.player == null || !ClientPerspective.isTopDown()) {
             if (culling || hiddenCount != 0 || raysCast != 0) {
                 HIDDEN.clear();
                 hiddenCount = 0;

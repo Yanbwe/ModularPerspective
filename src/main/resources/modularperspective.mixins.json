@@ -10,7 +10,8 @@
     "LevelRendererMixin",
     "MouseHandlerMixin",
     "MouseHandlerAccessor",
-    "MinecraftAccessor"
+    "MinecraftAccessor",
+    "RenderChunkRegionMixin"
   ],
   "injectors": {
     "defaultRequire": 1

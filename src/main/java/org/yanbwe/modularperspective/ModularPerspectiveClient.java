@@ -27,6 +27,7 @@ import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
 import org.yanbwe.modularperspective.api.hud.HudRegistry;
 import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
+import org.yanbwe.modularperspective.client.cull.BlockCuller;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
@@ -65,6 +66,7 @@ public final class ModularPerspectiveClient {
     private static final String AUTO_MARKER_PERSIST = "m3-persist.marker";
     private static final String AUTO_MARKER_M4 = "m4-auto.marker";
     private static final String AUTO_MARKER_M5 = "m5-auto.marker";
+    private static final String AUTO_MARKER_M6 = "m6-auto.marker";
     private static final int AUTO_ENABLE_AT = 40;
     private static final int AUTO_MOVE_AT = 50;
     private static final int AUTO_SHOT_ON_AT = 80;
@@ -81,6 +83,7 @@ public final class ModularPerspectiveClient {
     private static boolean autoModePersist;
     private static boolean autoModeM4;
     private static boolean autoModeM5;
+    private static boolean autoModeM6;
     private static boolean autoModeChecked;
     private static double autoMoveStartX;
     private static double autoMoveStartZ;
@@ -160,6 +163,7 @@ public final class ModularPerspectiveClient {
         ClientPerspective.tick(minecraft);
         CursorController.tick(minecraft);
         SectionCuller.tick(minecraft);
+        BlockCuller.tick(minecraft);
         runAutoVerification(minecraft);
     }
 
@@ -223,16 +227,24 @@ public final class ModularPerspectiveClient {
             autoModePersist = new File(minecraft.gameDirectory, AUTO_MARKER_PERSIST).isFile();
             autoModeM4 = new File(minecraft.gameDirectory, AUTO_MARKER_M4).isFile();
             autoModeM5 = new File(minecraft.gameDirectory, AUTO_MARKER_M5).isFile();
-            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist || autoModeM4 || autoModeM5) {
+            autoModeM6 = new File(minecraft.gameDirectory, AUTO_MARKER_M6).isFile();
+            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist || autoModeM4 || autoModeM5
+                    || autoModeM6) {
                 ModularPerspective.LOGGER.info(
-                        "[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={} M4={} M5={}",
-                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist, autoModeM4, autoModeM5);
+                        "[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={} M4={} M5={} M6={}",
+                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist, autoModeM4, autoModeM5,
+                        autoModeM6);
             }
         }
-        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist && !autoModeM4 && !autoModeM5) {
+        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist && !autoModeM4
+                && !autoModeM5 && !autoModeM6) {
             return;
         }
         autoTicks++;
+        if (autoModeM6) {
+            runM6Verification(minecraft);
+            return;
+        }
         if (autoModeM5) {
             runM5Verification(minecraft);
             return;
@@ -572,6 +584,71 @@ public final class ModularPerspectiveClient {
                     autoPhase = 7;
                     autoPhaseTick = autoTicks;
                     ModularPerspective.LOGGER.info("[auto] M5 verification finished");
+                }
+            }
+            default -> {
+                // 完成：不再动作。
+            }
+        }
+    }
+
+    /**
+     * M6 方块级剔除自动验收（marker {@code m6-auto.marker}，§11.2、§16 M6）：
+     * 在相机与玩家之间搭 10×16 石墙，方块级剔除应在墙上挖出“视线隧道”并让玩家可见；
+     * 关闭 blockLevel 后墙恢复完整。
+     */
+    private static void runM6Verification(Minecraft minecraft) {
+        if (autoTicks < AUTO_ENABLE_AT) {
+            return;
+        }
+        switch (autoPhase) {
+            case 0 -> {
+                ClientPerspective.setTopDown(true);
+                CursorController.setUnlocked(true);
+                autoSavedPauseOnLostFocus = minecraft.options.pauseOnLostFocus;
+                minecraft.options.pauseOnLostFocus = false;
+                runServerCommand(minecraft, "gamemode creative @s");
+                runServerCommand(minecraft, "tp @s 290 ~ 290");
+                autoPhase = 1;
+                autoPhaseTick = autoTicks;
+                ModularPerspective.LOGGER.info("[auto] M6 phase0: setup at section boundary");
+            }
+            case 1 -> {
+                if (autoTicks - autoPhaseTick >= 20) {
+                    BlockPos base = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, base);
+                    int built = buildWall(minecraft, base, 10, 16, 2);
+                    autoPhase = 2;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M6 phase1: wall built ({} blocks) at {}", built, base);
+                }
+            }
+            case 2 -> {
+                if (autoTicks - autoPhaseTick >= 20) {
+                    grabScreenshot(minecraft, "m6-block-culled.png");
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M6 block-culled: culling={} blocks={} rays={} dirty={} section={}",
+                            BlockCuller.isCulling(), BlockCuller.culledCount(), BlockCuller.raysCast(),
+                            BlockCuller.dirtyPending(), SectionCuller.hiddenCount());
+                    Config.CULLING_ENABLED.set(false);
+                    BlockCuller.invalidate();
+                    SectionCuller.invalidate();
+                    autoPhase = 3;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 3 -> {
+                if (autoTicks - autoPhaseTick >= 20) {
+                    grabScreenshot(minecraft, "m6-block-off.png");
+                    ModularPerspective.LOGGER.info("[auto] M6 block-off: culling={} blocks={} rays={} section={}",
+                            BlockCuller.isCulling(), BlockCuller.culledCount(), BlockCuller.raysCast(),
+                            SectionCuller.hiddenCount());
+                    Config.CULLING_ENABLED.set(true);
+                    BlockCuller.invalidate();
+                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
+                    autoPhase = 4;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M6 verification finished");
                 }
             }
             default -> {
