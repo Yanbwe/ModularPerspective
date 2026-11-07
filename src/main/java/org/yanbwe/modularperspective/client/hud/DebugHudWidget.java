@@ -13,6 +13,7 @@ import org.yanbwe.modularperspective.api.hud.HudLayout;
 import org.yanbwe.modularperspective.api.hud.HudWidget;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
 import org.yanbwe.modularperspective.client.cull.BlockCuller;
+import org.yanbwe.modularperspective.client.cull.RoomScanner;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
 
 /**
@@ -114,6 +115,7 @@ public final class DebugHudWidget implements HudWidget {
                     + " scan=" + SectionCuller.lastScanMicros() + "us");
             lines.add("filter=" + SectionCuller.lastFilterMicros() + "us/" + SectionCuller.maxFilterMicros() + "us");
         }
+        lines.add("room: " + (RoomScanner.isIndoor() ? "indoor" : "outdoor") + " air=" + RoomScanner.airCount() + " shell=" + RoomScanner.shellCount());
         lines.add("HUD: " + ClientHud.widgetCount() + " widget(s)  [点击左上胶囊切换本层]");
         return lines;
     }

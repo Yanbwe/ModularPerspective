@@ -29,6 +29,7 @@ import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
 import org.yanbwe.modularperspective.client.cull.BlockCuller;
 import org.yanbwe.modularperspective.client.cull.CullingGhostRenderer;
+import org.yanbwe.modularperspective.client.cull.RoomScanner;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
@@ -164,6 +165,7 @@ public final class ModularPerspectiveClient {
         }
         ClientPerspective.tick(minecraft);
         CursorController.tick(minecraft);
+        RoomScanner.tick(minecraft);
         SectionCuller.tick(minecraft);
         BlockCuller.tick(minecraft);
         runAutoVerification(minecraft);
@@ -653,9 +655,37 @@ public final class ModularPerspectiveClient {
                             SectionCuller.hiddenCount());
                     Config.CULLING_ENABLED.set(true);
                     BlockCuller.invalidate();
-                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
+                    BlockPos base = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, base);
+                    int room = buildRoom(minecraft, base);
+                    RoomScanner.invalidate();
                     autoPhase = 4;
                     autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M6 phase3: room built ({} blocks)", room);
+                }
+            }
+            case 4 -> {
+                if (autoTicks - autoPhaseTick >= 25) {
+                    RoomScanner.invalidate();
+                    grabScreenshot(minecraft, "m6-room-indoor.png");
+                    ModularPerspective.LOGGER.info("[auto] M6 room-indoor: type={} air={} shell={} culling={} blocks={}",
+                            RoomScanner.type(), RoomScanner.airCount(), RoomScanner.shellCount(),
+                            BlockCuller.isCulling(), BlockCuller.culledCount());
+                    clearSceneArea(minecraft, minecraft.player.blockPosition());
+                    RoomScanner.invalidate();
+                    autoPhase = 5;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 5 -> {
+                if (autoTicks - autoPhaseTick >= 25) {
+                    RoomScanner.invalidate();
+                    grabScreenshot(minecraft, "m6-room-outdoor.png");
+                    ModularPerspective.LOGGER.info("[auto] M6 room-outdoor: type={} air={} shell={} culling={} blocks={}",
+                            RoomScanner.type(), RoomScanner.airCount(), RoomScanner.shellCount(),
+                            BlockCuller.isCulling(), BlockCuller.culledCount());
+                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
+                    autoPhase = 6;
                     ModularPerspective.LOGGER.info("[auto] M6 verification finished");
                 }
             }
@@ -721,6 +751,27 @@ public final class ModularPerspectiveClient {
         return count;
     }
 
+    /** 以玩家为中心搭一个 5×5×3 的封闭小房间（墙 + 天花板，仅客户端方块），用于房间扫描验收。 */
+    private static int buildRoom(Minecraft minecraft, BlockPos base) {
+        if (minecraft.level == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                for (int dy = 0; dy <= 2; dy++) {
+                    boolean perimeter = Math.abs(dx) == 2 || Math.abs(dz) == 2;
+                    if (perimeter) {
+                        minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
+                        count++;
+                    }
+                }
+                minecraft.level.setBlock(base.offset(dx, 3, dz), Blocks.STONE.defaultBlockState(), 3);
+                count++;
+            }
+        }
+        return count;
+    }
     /**
      * 在相机与玩家之间搭石墙（仅客户端方块，开发期剔除验收用）。
      *

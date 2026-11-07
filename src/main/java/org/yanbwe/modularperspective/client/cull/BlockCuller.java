@@ -137,7 +137,7 @@ public final class BlockCuller {
                 break;
             }
             rays++;
-            carveRay(level, camera, target, minY, playerSection);
+            carveRay(level, camera, target, minY, RoomScanner.isIndoor() ? Long.MIN_VALUE : playerSection);
         }
 
         // 只把“状态变化”的方块所在 section 标脏：静止时不会反复重建。
@@ -199,7 +199,7 @@ public final class BlockCuller {
             if (!state.isSolidRender(level, center)) {
                 continue;
             }
-            if (!floodCarveShape(level, center, minY, playerSection, visited)) {
+            if (!floodCarveShape(level, center, minY, playerSection, visited, RoomScanner.isIndoor())) {
                 carveTunnel(level, center);
             }
             if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
@@ -209,20 +209,29 @@ public final class BlockCuller {
     }
 
     /**
-     * 从首个命中方块出发，沿 6 邻接把连通的实心方块整体剔除（旧模组 SightlineMask 的“连通形状”近似）。
-     * 先做计数：连通形状超过 {@link #MAX_SHAPE_BLOCKS} 块时返回 false，调用方退回只挖视线隧道，
-     * 避免把山体/屋顶这类超大连通地形挖掉一块。
+     * 从首个命中方块出发，沿 6 邻接 BFS（旧模组 SightlineMask 的“连通形状”近似）。
+     * 室外（{@code shellOnly == false}）：把连通的实心方块整体剔除，超过 {@link #MAX_SHAPE_BLOCKS} 块时返回 false，
+     * 调用方退回只挖视线隧道，避免把山体/屋顶这类超大连通地形挖掉一块。
+     * 室内（{@code shellOnly == true}）：只把“与房间空气相邻”的外壳方块计入剔除集，避免把与房间相连的整座山体一起挖掉；
+     * BFS 访问上限 {@code MAX_SHAPE_BLOCKS * 2}，超限同样返回 false 退回隧道。
      * 另外跳过玩家脚下以下的方块，避免挖穿地面。
      */
-    private static boolean floodCarveShape(Level level, BlockPos start, int minY, long playerSection, LongOpenHashSet visited) {
+    private static boolean floodCarveShape(Level level, BlockPos start, int minY, long playerSection, LongOpenHashSet visited, boolean shellOnly) {
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
         java.util.List<BlockPos> collected = new java.util.ArrayList<>();
+        if (!shellOnly || RoomScanner.isShell(start)) {
+            collected.add(start);
+        }
         queue.add(start);
-        collected.add(start);
         double maxDistanceSq = MAX_FLOOD_DISTANCE * MAX_FLOOD_DISTANCE;
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
+        int visitedCap = shellOnly ? MAX_SHAPE_BLOCKS * 2 : Integer.MAX_VALUE;
+        int visitedCount = 0;
         while (!queue.isEmpty()) {
             BlockPos pos = queue.poll();
+            if (++visitedCount > visitedCap) {
+                return false;
+            }
             if (pos.getY() < minY || SectionPos.asLong(pos) == playerSection) {
                 continue;
             }
@@ -251,13 +260,17 @@ public final class BlockCuller {
                         continue;
                     }
                     BlockState state = level.getBlockState(neighbor);
-                    if (state.isSolidRender(level, neighbor)) {
+                    if (!state.isSolidRender(level, neighbor)) {
+                        continue;
+                    }
+                    boolean include = !shellOnly || RoomScanner.isShell(neighbor);
+                    if (include) {
                         collected.add(neighbor);
                         if (collected.size() > MAX_SHAPE_BLOCKS) {
                             return false;
                         }
-                        queue.add(neighbor);
                     }
+                    queue.add(neighbor);
                 }
             }
         }
@@ -292,7 +305,6 @@ public final class BlockCuller {
             }
         }
     }
-
     /** 对比 CULLED 与 NEXT_CULLED，把状态变化的方块所在 section 加入待重建队列。 */
     private static void markChangedSections() {
         for (LongIterator it = CULLED.iterator(); it.hasNext(); ) {

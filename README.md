@@ -54,7 +54,7 @@ HudRegistry.register(ResourceLocation.fromNamespaceAndPath("examplemod", "quest_
 
 ## 剔除
 
-v0.2 起默认 **方块级剔除**（`culling.blockLevel=true`）：沿相机→玩家 9 条视线每 0.25 格采样，命中实心方块后按 6 邻接 **BFS 把整个连通形状**从区块 mesh 中剔除（单形状上限 1024 块、全局 8192、只处理相机 48 格内、跳过玩家脚下及以下与玩家 section）；连通形状超过 1024 块（山体/屋顶）时退回“命中点周围 27 格视线隧道”，避免挖掉大片地形。重建只把状态变化的 section 按 16 个/tick 预算标脏（`RenderChunkRegionMixin` 把被剔除方块返回空气，只影响渲染，不改世界/碰撞）。被剔除方块会画 0.35 透明度的青色线框（`culling.ghostOutline`，默认开）。`culling.blockLevel=false` 退回 v0.1 section 级近似（每 2 tick 射线命中即隐藏整段 16³ section，`renderSectionLayer` 过滤）；`culling.enabled=false` 两者都关。开发期验收：五场景 section 级扫描最大 83us/过滤最大 28us（预算 2ms/0.2ms）；方块级 10×16 石墙 672 块被整体隐藏、关闭后完整恢复。尚未移植旧版 RoomScanner 房间扫描与幽灵方块贴图（v0.3）；Sodium/光影兼容暂缓。
+v0.2 起默认 **方块级剔除**（`culling.blockLevel=true`）：沿相机→玩家 9 条视线每 0.25 格采样，命中实心方块后按 6 邻接 **BFS 把整个连通形状**从区块 mesh 中剔除（单形状上限 1024 块、全局 8192、只处理相机 48 格内、跳过玩家脚下及以下与玩家 section）；连通形状超过 1024 块（山体/屋顶）时退回“命中点周围 27 格视线隧道”，避免挖掉大片地形。重建只把状态变化的 section 按 16 个/tick 预算标脏（`RenderChunkRegionMixin` 把被剔除方块返回空气，只影响渲染，不改世界/碰撞）。被剔除方块会画 0.35 透明度的青色线框（`culling.ghostOutline`，默认开）。`culling.blockLevel=false` 退回 v0.1 section 级近似（每 2 tick 射线命中即隐藏整段 16³ section，`renderSectionLayer` 过滤）；`culling.enabled=false` 两者都关。开发期验收：五场景 section 级扫描最大 83us/过滤最大 28us（预算 2ms/0.2ms）；方块级 10×16 石墙 672 块被整体隐藏、关闭后完整恢复。房间扫描首版已接入（`RoomScanner`：从玩家空气泛洪判断室内/室外；室内只剔除房间外壳连通片、且不跳过玩家 section），尚未做房间图/门洞识别/房间合并；幽灵方块贴图留待后续；Sodium/光影兼容暂缓。
 
 ## 目录
 
@@ -66,7 +66,7 @@ src/main/java/org/yanbwe/modularperspective/
   api/camera/                      公开类型：通道、指令、目标、快照、锁、强制级别、结束原因、缓动、投影、策略
   client/camera/                   相机栈与客户端预设（CameraStack / ClientPerspective）
   client/input/                    伪解锁光标状态机（CursorController）
-  client/cull/                     剔除：BlockCuller（方块级）/ SectionCuller（section 级）/ CullingGhostRenderer（线框）
+  client/cull/                     剔除：BlockCuller（方块级）/ SectionCuller（section 级）/ RoomScanner（室内外）/ CullingGhostRenderer（线框）
   api/hud/                         公开 HUD 类型（Anchor/HudWidget/HudContext/HudLayout/HudRegistry）
   client/hud/                      HUD 宿主与内置控件（ClientHud/CameraStatusWidget/DebugHudWidget）
   client/PerspectiveClientNetwork  客户端 payload 接收（快照 → CameraStack）
