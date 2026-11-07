@@ -5,7 +5,9 @@ import java.io.File;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.Screenshot;
+import net.minecraft.client.gui.screens.PauseScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.HitResult;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
@@ -21,8 +23,12 @@ import net.neoforged.neoforge.common.NeoForge;
 import org.lwjgl.glfw.GLFW;
 import org.yanbwe.modularperspective.api.camera.InputLock;
 import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
+import org.yanbwe.modularperspective.api.hud.HudRegistry;
 import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
+import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
+import org.yanbwe.modularperspective.client.hud.ClientHud;
+import org.yanbwe.modularperspective.client.hud.DebugHudWidget;
 import org.yanbwe.modularperspective.client.input.CursorController;
 
 /**
@@ -54,6 +60,7 @@ public final class ModularPerspectiveClient {
     private static final String AUTO_MARKER_MOVE = "move-auto.marker";
     private static final String AUTO_MARKER_M3 = "m3-auto.marker";
     private static final String AUTO_MARKER_PERSIST = "m3-persist.marker";
+    private static final String AUTO_MARKER_M4 = "m4-auto.marker";
     private static final int AUTO_ENABLE_AT = 40;
     private static final int AUTO_MOVE_AT = 50;
     private static final int AUTO_SHOT_ON_AT = 80;
@@ -68,6 +75,7 @@ public final class ModularPerspectiveClient {
     private static boolean autoModeMove;
     private static boolean autoModeM3;
     private static boolean autoModePersist;
+    private static boolean autoModeM4;
     private static boolean autoModeChecked;
     private static double autoMoveStartX;
     private static double autoMoveStartZ;
@@ -86,6 +94,12 @@ public final class ModularPerspectiveClient {
 
         // 客户端配置界面（Mods 列表里点 Config 可编辑 §13 的客户端项）。
         modContainer.registerExtensionPoint(IConfigScreenFactory.class, ConfigurationScreen::new);
+
+        // M4：内置 HUD 控件（第三方也可用 HudRegistry.register 注册自己的控件，§10.2）。
+        HudRegistry.register(ResourceLocation.fromNamespaceAndPath(ModularPerspective.MODID, "camera_status"),
+                context -> new CameraStatusWidget());
+        HudRegistry.register(ResourceLocation.fromNamespaceAndPath(ModularPerspective.MODID, "debug_overlay"),
+                context -> new DebugHudWidget());
 
         // game bus：tick 消费按键 + 相机状态推进；FOV 通道走 ViewportEvent（§8.2，不 mixin getFov）。
         NeoForge.EVENT_BUS.addListener(ModularPerspectiveClient::onClientTick);
@@ -109,6 +123,9 @@ public final class ModularPerspectiveClient {
                 original.render(guiGraphics, deltaTracker);
             }
         });
+        // M4：HUD 挂件层放在 registerAboveAll——这是唯一真正压在所有原版层（含睡眠/演示/调试）之上的位置（§10.2）。
+        event.registerAboveAll(ResourceLocation.fromNamespaceAndPath(ModularPerspective.MODID, "hud"),
+                ClientHud.INSTANCE);
     }
 
     private static void onClientSetup(FMLClientSetupEvent event) {
@@ -146,6 +163,11 @@ public final class ModularPerspectiveClient {
         boolean pressed = event.getAction() == InputConstants.PRESS;
         if (CursorController.onMouseButton(minecraft, event.getButton(), pressed)) {
             event.setCanceled(true);
+            return;
+        }
+        // M4 控件路由（§10.3）：非 clickThrough 控件消费后不触发攻击/挖掘/拾取。
+        if (ClientHud.onMouseButton(pressed, event.getButton())) {
+            event.setCanceled(true);
         }
     }
 
@@ -155,6 +177,11 @@ public final class ModularPerspectiveClient {
      */
     private static void onMouseScrolling(InputEvent.MouseScrollingEvent event) {
         Minecraft minecraft = Minecraft.getInstance();
+        // M4：滚轮先给 HUD 控件（§10.3 只给 hover；clickThrough=false 时消费）。
+        if (ClientHud.onMouseScroll(event.getScrollDeltaY())) {
+            event.setCanceled(true);
+            return;
+        }
         if (!ClientPerspective.isTopDown() || minecraft.screen != null) {
             return;
         }
@@ -186,15 +213,21 @@ public final class ModularPerspectiveClient {
             autoModeMove = new File(minecraft.gameDirectory, AUTO_MARKER_MOVE).isFile();
             autoModeM3 = new File(minecraft.gameDirectory, AUTO_MARKER_M3).isFile();
             autoModePersist = new File(minecraft.gameDirectory, AUTO_MARKER_PERSIST).isFile();
-            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist) {
-                ModularPerspective.LOGGER.info("[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={}",
-                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist);
+            autoModeM4 = new File(minecraft.gameDirectory, AUTO_MARKER_M4).isFile();
+            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist || autoModeM4) {
+                ModularPerspective.LOGGER.info(
+                        "[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={} M4={}",
+                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist, autoModeM4);
             }
         }
-        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist) {
+        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist && !autoModeM4) {
             return;
         }
         autoTicks++;
+        if (autoModeM4) {
+            runM4Verification(minecraft);
+            return;
+        }
         if (autoModePersist) {
             runPersistVerification(minecraft);
             return;
@@ -344,7 +377,106 @@ public final class ModularPerspectiveClient {
     }
 
     /**
-     * 持久化验收（marker {@code m3-persist.marker}）：推一条长指令 → saveEverything → stopServer，
+     * M4 HUD 自动验收（marker {@code m4-auto.marker}，§16 M4）：
+     * 俯视 + 自由光标 → 截图（挂件可见）→ 点击左上胶囊（非 clickThrough 控件消费、切换调试层）
+     * → 截图调试层 → 打开 PauseScreen（HUD 不渲染、鼠标状态清空）→ 截图 → 关闭屏幕
+     * → {@code /perspective hud @s off}（hudVisible=false 整层跳过）→ 截图。
+     */
+    private static void runM4Verification(Minecraft minecraft) {
+        if (autoTicks < AUTO_ENABLE_AT) {
+            return;
+        }
+        switch (autoPhase) {
+            case 0 -> {
+                ClientPerspective.setTopDown(true);
+                CursorController.setUnlocked(true);
+                moveCursor(minecraft, 0.5D, 0.5D);
+                autoPhase = 1;
+                autoPhaseTick = autoTicks;
+                ModularPerspective.LOGGER.info("[auto] M4 phase1: top-down + free cursor enabled");
+            }
+            case 1 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    grabScreenshot(minecraft, "m4-hud.png");
+                    ModularPerspective.LOGGER.info("[auto] M4 phase1b: hud screenshot; status={}",
+                            ClientHud.debugStatus());
+                    autoPhase = 2;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 2 -> {
+                if (autoTicks - autoPhaseTick >= 5) {
+                    boolean clickable = ClientHud.hasNonClickThroughAt(41, 11);
+                    ClientHud.debugClick(41, 11);
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M4 phase2: click status widget clickable={} debugForced={} status={}",
+                            clickable, ClientHud.debugOverlayForced(), ClientHud.debugStatus());
+                    autoPhase = 3;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 3 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    grabScreenshot(minecraft, "m4-debug.png");
+                    ModularPerspective.LOGGER.info("[auto] M4 phase3: debug overlay screenshot; debugForced={}",
+                            ClientHud.debugOverlayForced());
+                    autoPhase = 4;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 4 -> {
+                if (autoTicks - autoPhaseTick >= 5) {
+                    minecraft.setScreen(new PauseScreen(false));
+                    autoPhase = 5;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M4 phase4: fake PauseScreen opened (screen={})",
+                            minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName());
+                }
+            }
+            case 5 -> {
+                if (autoTicks - autoPhaseTick >= 5) {
+                    grabScreenshot(minecraft, "m4-screen.png");
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M4 phase5: screen screenshot; screen={} status={}",
+                            minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName(),
+                            ClientHud.debugStatus());
+                    autoPhase = 6;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 6 -> {
+                if (autoTicks - autoPhaseTick >= 5) {
+                    minecraft.setScreen(null);
+                    autoPhase = 7;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M4 phase6: screen closed (screen={})",
+                            minecraft.screen == null ? "null" : minecraft.screen.getClass().getSimpleName());
+                }
+            }
+            case 7 -> {
+                if (autoTicks - autoPhaseTick >= 10) {
+                    runServerCommand(minecraft, "perspective hud @s off 100");
+                    autoPhase = 8;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M4 phase7: hud-off command sent");
+                }
+            }
+            case 8 -> {
+                if (autoTicks - autoPhaseTick >= 15) {
+                    grabScreenshot(minecraft, "m4-hudoff.png");
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M4 verification finished: hudVisible={} status={}",
+                            ClientPerspective.hudVisible(), ClientHud.debugStatus());
+                    autoPhase = 9;
+                }
+            }
+            default -> {
+                // 完成：不再动作。
+            }
+        }
+    }
+
+    /**
      * 退出后检查 playerdata 里的 attachment 是否落盘。
      */
     private static void runPersistVerification(Minecraft minecraft) {

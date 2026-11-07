@@ -35,6 +35,7 @@ import org.yanbwe.modularperspective.api.camera.Projection;
  * /perspective camera &lt;targets&gt; &lt;yaw&gt; &lt;pitch&gt; [duration]
  * /perspective preset &lt;targets&gt; &lt;top-down|reset&gt; [duration]
  * /perspective lock &lt;targets&gt; &lt;rotate|zoom|move|all&gt; &lt;on|off&gt;
+ * /perspective hud &lt;targets&gt; &lt;on|off&gt; [duration]
  * /perspective clear &lt;targets&gt;
  * /perspective query &lt;targets&gt;
  * </pre>
@@ -46,6 +47,7 @@ public final class PerspectiveCommand {
     /** 命令产生的指令 id：重复执行同 id → 替换旧指令（§5.2）。 */
     private static final String COMMAND_DIRECTIVE_ID = ModularPerspective.MODID + ":command";
     private static final String PRESET_DIRECTIVE_ID = ModularPerspective.MODID + ":preset";
+    private static final String HUD_DIRECTIVE_ID = ModularPerspective.MODID + ":hud";
     private static final int DEFAULT_DURATION = 40;
     private static final float DEFAULT_DISTANCE = 6.0F;
     private static final int DEFAULT_PRIORITY = 100;
@@ -88,6 +90,20 @@ public final class PerspectiveCommand {
                                 .then(lockChoices("zoom"))
                                 .then(lockChoices("move"))
                                 .then(lockChoices("all"))))
+                .then(Commands.literal("hud")
+                        .then(Commands.argument("targets", EntityArgument.players())
+                                .then(Commands.literal("on")
+                                        .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"), true,
+                                                DEFAULT_DURATION))
+                                        .then(Commands.argument("duration", IntegerArgumentType.integer(1, 24000))
+                                                .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"),
+                                                        true, IntegerArgumentType.getInteger(ctx, "duration")))))
+                                .then(Commands.literal("off")
+                                        .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"), false,
+                                                DEFAULT_DURATION))
+                                        .then(Commands.argument("duration", IntegerArgumentType.integer(1, 24000))
+                                                .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"),
+                                                        false, IntegerArgumentType.getInteger(ctx, "duration")))))))
                 .then(Commands.literal("policy")
                         .then(Commands.argument("targets", EntityArgument.players())
                                 .then(policyFlag("allowRequire", 0))
@@ -197,6 +213,32 @@ public final class PerspectiveCommand {
             channels.add(CameraChannel.INPUT_LOCK);
         }
         return PerspectiveServer.push(target, id, priority, enforcement, channels, value, duration, requiresAck, keepOnDeath);
+    }
+
+    // ------------------------------------------------------------------ hud
+
+    /** {@code /perspective hud <targets> <on|off> [duration]}：只动 HUD 通道（§10.2 整层跳过验收用）。 */
+    private static int hud(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets,
+                           boolean visible, int duration) {
+        int affected = 0;
+        for (ServerPlayer target : targets) {
+            CameraTarget value = new CameraTarget(null, null, null, null, null, null, visible, null);
+            try {
+                CameraDirective directive = PerspectiveServer.push(target, HUD_DIRECTIVE_ID, DEFAULT_PRIORITY,
+                        Enforcement.SUGGEST, EnumSet.of(CameraChannel.HUD), value, duration, false, false);
+                ModularPerspective.LOGGER.info("[perspective] command hud {} -> {} id={} seq={} duration={}",
+                        visible ? "on" : "off", target.getGameProfile().getName(), directive.id(), directive.seq(),
+                        duration);
+                affected++;
+            } catch (IllegalArgumentException exception) {
+                ctx.getSource().sendFailure(Component.literal("perspective: " + exception.getMessage()));
+                return 0;
+            }
+        }
+        int count = affected;
+        ctx.getSource().sendSuccess(
+                () -> Component.literal("Set HUD visible=" + visible + " for " + count + " player(s)"), false);
+        return count;
     }
 
     // ------------------------------------------------------------------ policy

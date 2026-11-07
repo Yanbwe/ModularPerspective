@@ -3,6 +3,7 @@ package org.yanbwe.modularperspective.client.camera;
 import com.mojang.blaze3d.vertex.VertexSorting;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import net.minecraft.client.Camera;
 import net.minecraft.client.CameraType;
@@ -374,6 +375,34 @@ public final class ClientPerspective {
 
     public static boolean isOrtho() {
         return applied != null && applied.orthographic();
+    }
+
+    /**
+     * HUD 层是否可见（§10.2）：服务端快照的 {@code hudVisible=false} 时整层跳过；
+     * 没有相机状态视为原版 HUD，始终可见。
+     */
+    public static boolean hudVisible() {
+        ResolvedCameraState state = applied;
+        if (state == null) {
+            return true;
+        }
+        Boolean visible = state.hudVisible();
+        return visible == null || visible;
+    }
+
+    /** 仲裁栈当前指令的只读视图（HUD/调试面板展示用，§10.2）。 */
+    public static List<CameraDirective> directiveView() {
+        return List.copyOf(STACK.directives());
+    }
+
+    /** 已应用的服务端快照 revision（-1 = 从未收到，§7.3）。 */
+    public static long snapshotRevision() {
+        return snapshotRevision;
+    }
+
+    /** 服务端快照携带的策略（§6.5），HUD/调试面板只读。 */
+    public static PerspectivePolicy serverPolicy() {
+        return serverPolicy;
     }
 
     /** 退出世界/切换维度时清掉本地状态并恢复相机类型。 */
