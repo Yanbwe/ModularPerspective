@@ -8,7 +8,9 @@ import net.neoforged.fml.config.ModConfig;
 import net.neoforged.fml.loading.FMLEnvironment;
 import net.neoforged.neoforge.common.NeoForge;
 import org.slf4j.Logger;
+import org.yanbwe.modularperspective.network.PerspectiveNetwork;
 import org.yanbwe.modularperspective.server.PerspectiveCommand;
+import org.yanbwe.modularperspective.server.PerspectiveServer;
 
 /**
  * Modular Perspective 主入口（common，单 {@code @Mod}）。
@@ -37,6 +39,14 @@ public final class ModularPerspective {
 
         // 命令注册在 game bus（RegisterCommandsEvent，§12）。
         NeoForge.EVENT_BUS.addListener(PerspectiveCommand::register);
+
+        // 网络：payload 注册在 mod bus；服务端 tick/玩家事件在 game bus（§7.1、§7.3）。
+        modEventBus.addListener(PerspectiveNetwork::registerCommon);
+        NeoForge.EVENT_BUS.addListener(PerspectiveServer::onServerTick);
+        NeoForge.EVENT_BUS.addListener(PerspectiveServer::onPlayerLoggedIn);
+        NeoForge.EVENT_BUS.addListener(PerspectiveServer::onPlayerLoggedOut);
+        NeoForge.EVENT_BUS.addListener(PerspectiveServer::onPlayerRespawn);
+        NeoForge.EVENT_BUS.addListener(PerspectiveServer::onPlayerChangedDimension);
 
         LOGGER.info("[{}] common entry loaded (dist={})", MODID, FMLEnvironment.dist);
     }

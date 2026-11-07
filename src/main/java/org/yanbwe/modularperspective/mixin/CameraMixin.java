@@ -30,7 +30,7 @@ public abstract class CameraMixin {
     @Inject(method = "setup", at = @At("RETURN"))
     private void modularperspective$applyResolvedState(BlockGetter level, Entity entity, boolean detached,
                                                        boolean mirrored, float partialTick, CallbackInfo ci) {
-        ResolvedCameraState state = ClientPerspective.current();
+        ResolvedCameraState state = ClientPerspective.frameState(partialTick);
         if (state == null) {
             return;
         }

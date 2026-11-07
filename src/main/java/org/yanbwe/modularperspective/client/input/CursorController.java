@@ -6,6 +6,7 @@ import net.minecraft.client.Camera;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.MouseHandler;
+import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.world.phys.BlockHitResult;
@@ -98,7 +99,10 @@ public final class CursorController {
                 dragLastX = minecraft.mouseHandler.xpos();
                 dragLastY = minecraft.mouseHandler.ypos();
                 ClientPerspective.addYawOffset((float) (-deltaX * DRAG_SENSITIVITY));
-                ClientPerspective.addPitchOffset((float) (deltaY * DRAG_SENSITIVITY));
+                if (Screen.hasAltDown()) {
+                    // §9.1 调整（m02434）：中键默认只左右转；按住 Alt 才是自由旋转（yaw + pitch）。
+                    ClientPerspective.addPitchOffset((float) (deltaY * DRAG_SENSITIVITY));
+                }
             }
         } else if (minecraft.screen != null) {
             // 开 Screen 时原版会把光标交还给 GUI；关闭 Screen 后由 tick 重新套用伪解锁。

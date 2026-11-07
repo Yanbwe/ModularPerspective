@@ -19,6 +19,7 @@ import net.neoforged.neoforge.client.gui.IConfigScreenFactory;
 import net.neoforged.neoforge.client.gui.VanillaGuiLayers;
 import net.neoforged.neoforge.common.NeoForge;
 import org.lwjgl.glfw.GLFW;
+import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
 import org.yanbwe.modularperspective.client.input.CursorController;
 
@@ -49,6 +50,7 @@ public final class ModularPerspectiveClient {
     private static final String AUTO_MARKER_M1 = "poc1-auto.marker";
     private static final String AUTO_MARKER_M2 = "m2-auto.marker";
     private static final String AUTO_MARKER_MOVE = "move-auto.marker";
+    private static final String AUTO_MARKER_M3 = "m3-auto.marker";
     private static final int AUTO_ENABLE_AT = 40;
     private static final int AUTO_MOVE_AT = 50;
     private static final int AUTO_SHOT_ON_AT = 80;
@@ -57,9 +59,11 @@ public final class ModularPerspectiveClient {
     private static final int AUTO_MOVE_START_AT = 60;
     private static final int AUTO_MOVE_STOP_AT = 100;
 
+    // 开发期自动验收（marker 存在才启用；验收后删 marker）。
     private static boolean autoModeM1;
     private static boolean autoModeM2;
     private static boolean autoModeMove;
+    private static boolean autoModeM3;
     private static boolean autoModeChecked;
     private static double autoMoveStartX;
     private static double autoMoveStartZ;
@@ -71,6 +75,7 @@ public final class ModularPerspectiveClient {
         modEventBus.addListener(ModularPerspectiveClient::onRegisterKeyMappings);
         modEventBus.addListener(ModularPerspectiveClient::onRegisterGuiLayers);
         modEventBus.addListener(ModularPerspectiveClient::onClientSetup);
+        modEventBus.addListener(PerspectiveClientNetwork::register);
 
         // 客户端配置界面（Mods 列表里点 Config 可编辑 §13 的客户端项）。
         modContainer.registerExtensionPoint(IConfigScreenFactory.class, ConfigurationScreen::new);
@@ -167,15 +172,20 @@ public final class ModularPerspectiveClient {
             autoModeM1 = new File(minecraft.gameDirectory, AUTO_MARKER_M1).isFile();
             autoModeM2 = new File(minecraft.gameDirectory, AUTO_MARKER_M2).isFile();
             autoModeMove = new File(minecraft.gameDirectory, AUTO_MARKER_MOVE).isFile();
-            if (autoModeM1 || autoModeM2 || autoModeMove) {
-                ModularPerspective.LOGGER.info("[auto] verification mode: M1={} M2={} MOVE={}",
-                        autoModeM1, autoModeM2, autoModeMove);
+            autoModeM3 = new File(minecraft.gameDirectory, AUTO_MARKER_M3).isFile();
+            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3) {
+                ModularPerspective.LOGGER.info("[auto] verification mode: M1={} M2={} MOVE={} M3={}",
+                        autoModeM1, autoModeM2, autoModeMove, autoModeM3);
             }
         }
-        if (!autoModeM1 && !autoModeM2 && !autoModeMove) {
+        if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3) {
             return;
         }
         autoTicks++;
+        if (autoModeM3) {
+            runM3Verification(minecraft);
+            return;
+        }
         if (autoTicks == AUTO_ENABLE_AT) {
             ClientPerspective.setTopDown(true);
             if (autoModeM2) {
@@ -216,6 +226,47 @@ public final class ModularPerspectiveClient {
         }
     }
 
+    /**
+     * M3 双端链自动验收（marker {@code m3-auto.marker}）：用真实命令跑
+     * {@code /perspective camera @s 0 45 duration 200} → 服务端下发快照 → 客户端应用（正交生效）；
+     * 再 {@code /perspective clear @s} → 快照清空（回到原版视角），各阶段截图。
+     */
+    private static void runM3Verification(Minecraft minecraft) {
+        if (autoTicks == AUTO_ENABLE_AT) {
+            ClientPerspective.setTopDown(false);
+            runServerCommand(minecraft, "perspective camera @s 0 45 200");
+            ModularPerspective.LOGGER.info("[auto] M3 camera command sent; topDown={} ortho={}",
+                    ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+        } else if (autoTicks == AUTO_SHOT_ON_AT) {
+            grabScreenshot(minecraft, "m3-server.png");
+            ModularPerspective.LOGGER.info("[auto] M3 after snapshot: topDown={} ortho={}",
+                    ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+        } else if (autoTicks == AUTO_DISABLE_AT) {
+            runServerCommand(minecraft, "perspective clear @s");
+            ModularPerspective.LOGGER.info("[auto] M3 clear command sent");
+        } else if (autoTicks == AUTO_SHOT_OFF_AT) {
+            grabScreenshot(minecraft, "m3-cleared.png");
+            ModularPerspective.LOGGER.info("[auto] M3 verification finished (topDown={} ortho={})",
+                    ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+        }
+    }
+
+    /** 以 OP 权限在集成服务器上执行命令（仅开发期自动验收用；权限 4 绕过单人作弊开关）。 */
+    private static void runServerCommand(Minecraft minecraft, String command) {
+        net.minecraft.server.MinecraftServer server = minecraft.getSingleplayerServer();
+        if (server == null || minecraft.player == null) {
+            ModularPerspective.LOGGER.warn("[auto] M3 no integrated server/player; skipped: {}", command);
+            return;
+        }
+        net.minecraft.server.level.ServerPlayer player =
+                server.getPlayerList().getPlayer(minecraft.player.getUUID());
+        if (player == null) {
+            ModularPerspective.LOGGER.warn("[auto] M3 server player missing; skipped: {}", command);
+            return;
+        }
+        server.getCommands().performPrefixedCommand(
+                player.createCommandSourceStack().withPermission(4), command);
+    }
     private static void moveCursor(Minecraft minecraft, double nx, double ny) {
         GLFW.glfwSetCursorPos(minecraft.getWindow().getWindow(),
                 minecraft.getWindow().getScreenWidth() * nx, minecraft.getWindow().getScreenHeight() * ny);

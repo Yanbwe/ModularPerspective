@@ -34,7 +34,8 @@ PowerShell 下：
 
 ## 命令
 
-`/perspective camera|query|clear` —— M0 仅有占位输出，权限等级 ≥2。完整语法见 §12。
+`/perspective camera <targets> <yaw> <pitch> [duration]`、`/perspective clear <targets>`、`/perspective query <targets>`，权限等级 ≥2。
+M3 首版已接线：服务端栈 + 全量快照下发（登录/重生/换维度补发），`camera` 的落位是眼睛沿视线后退 6 格的正交俯视；完整设计语法与 M3 剩余项见 docs §12 / §16。
 
 ## 目录
 
@@ -46,7 +47,10 @@ src/main/java/org/yanbwe/modularperspective/
   api/camera/                      公开类型：通道、指令、目标、快照、锁、强制级别、结束原因、缓动、投影、策略
   client/camera/                   相机栈与客户端预设（CameraStack / ClientPerspective）
   client/input/                    伪解锁光标状态机（CursorController）
-  server/PerspectiveCommand.java   命令骨架
+  client/PerspectiveClientNetwork  客户端 payload 接收（快照 → CameraStack）
+  network/                         payload 定义与编解码（CameraSnapshotPayload / CameraArrivedPayload / PerspectiveNetwork）
+  server/PerspectiveCommand.java   /perspective 命令（M3: camera / clear / query）
+  server/PerspectiveServer.java    服务端指令栈与全量快照（M3 首版为内存栈，M4 换 attachment）
   mixin/                           相机/渲染/输入注入点
 src/test/java/org/yanbwe/modularperspective/   纯逻辑单测（JUnit 5）
 ```

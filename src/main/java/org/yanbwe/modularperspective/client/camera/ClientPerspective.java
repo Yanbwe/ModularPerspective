@@ -2,6 +2,8 @@ package org.yanbwe.modularperspective.client.camera;
 
 import com.mojang.blaze3d.vertex.VertexSorting;
 import java.util.EnumSet;
+import java.util.HashSet;
+import java.util.Set;
 import net.minecraft.client.Camera;
 import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
@@ -23,6 +25,7 @@ import org.yanbwe.modularperspective.api.camera.InputLock;
 import org.yanbwe.modularperspective.api.camera.Position3;
 import org.yanbwe.modularperspective.api.camera.Projection;
 import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
+import org.yanbwe.modularperspective.network.CameraSnapshotPayload;
 
 /**
  * 客户端相机状态（docs/design.md §5.6、§8.1、§8.2）。
@@ -48,7 +51,6 @@ public final class ClientPerspective {
     private static final float MAX_DISTANCE = 10.0F;
 
     public static final float NEAR_PLANE = 0.05F;
-    private static final float FAR_PADDING = 256.0F;
     /**
      * M1 起默认进世界就开俯视（docs §16 M1 验收：“进游戏即俯视且能看到角色”）。
      * 正式开关由 §13 的配置接管在 M4；现在先写死，方便 POC/验收；F6 仍可切回原版。
@@ -61,6 +63,9 @@ public final class ClientPerspective {
 
     @Nullable
     private static ResolvedCameraState applied;
+    /** 上一个 tick 的输出，用于渲染期按 partialTick 插值（m02619 平滑修复）。 */
+    @Nullable
+    private static ResolvedCameraState previous;
     private static boolean topDown;
     private static long presetSeq;
     private static long lastResolvedTick = Long.MIN_VALUE;
@@ -75,6 +80,12 @@ public final class ClientPerspective {
     private static CameraType savedCameraType = CameraType.FIRST_PERSON;
     /** 每次进入世界只应用一次默认开关（退出世界 {@link #reset()} 时清掉）。 */
     private static boolean initialisedForWorld;
+    /** 当前快照里“服务端来源”的指令 id（快照全量替换时只移除本集合，本地预设保留，§7.3）。 */
+    private static final Set<String> serverDirectiveIds = new HashSet<>();
+    /** 已应用的快照 revision（丢弃更旧的包；相等视为强制重发，§7.3）。 */
+    private static long snapshotRevision = -1L;
+    /** 服务端下发的 HUD 可见性（HUD 通道在 M4 接线，这里先存）。 */
+    private static Boolean serverHudVisible;
 
     private ClientPerspective() {}
 
@@ -175,6 +186,7 @@ public final class ClientPerspective {
             STACK.put(topDownDirective(minecraft, tick));
         }
         ResolvedCameraState target = STACK.resolve(tick);
+        previous = applied;
         applied = smooth(applied, target);
         syncCameraType(applied != null && applied.orthographic());
         // F5 保护（M1 验收）：正交下原版 F5 的切换会破坏第三人称背面构图，强制拉回。
@@ -189,6 +201,62 @@ public final class ClientPerspective {
         return applied;
     }
 
+    /**
+     * 渲染期读取（m02619 平滑修复）：在上一个 tick 与当前 tick 的输出之间按 partialTick 插值。
+     *
+     * <p>渲染帧率通常远高于 20 Hz 的客户端 tick；如果 {@code Camera#setup} 直接套用 tick 快照，
+     * 旋转/移动会呈现 20 Hz 台阶（“顿一下动一下，两动之间没有过渡”）。这里对连续量做帧级插值：
+     * position/pitch/distance/fov 线性，yaw 走最短弧；离散量（投影/锁/HUD）保持当前 tick 值。
+     */
+    @Nullable
+    public static ResolvedCameraState frameState(float partialTick) {
+        ResolvedCameraState to = applied;
+        if (to == null) {
+            return null;
+        }
+        ResolvedCameraState from = previous;
+        if (from == null) {
+            return to;
+        }
+        float delta = Mth.clamp(partialTick, 0.0F, 1.0F);
+        Position3 position = to.position() == null ? null
+                : from.position() == null ? to.position() : lerp(from.position(), to.position(), delta);
+        Float yaw = to.yaw() == null ? null
+                : from.yaw() == null ? to.yaw() : smoothAngle(from.yaw(), to.yaw(), delta);
+        Float pitch = to.pitch() == null ? null
+                : from.pitch() == null ? to.pitch() : lerp(from.pitch(), to.pitch(), delta);
+        Float distance = to.distance() == null ? null
+                : from.distance() == null ? to.distance() : lerp(from.distance(), to.distance(), delta);
+        Float fov = to.fov() == null ? null
+                : from.fov() == null ? to.fov() : lerp(from.fov(), to.fov(), delta);
+        return new ResolvedCameraState(position, yaw, pitch, distance, fov, to.projection(),
+                to.hudVisible(), to.locks());
+    }
+
+    /**
+     * 应用服务端全量快照（§7.3）：只替换 SERVER 来源的指令，本地预设（F4/F6/Home）保留。
+     * 丢弃比已应用更旧的 revision；相等视为强制重发照常应用。
+     */
+    public static void applySnapshot(CameraSnapshotPayload payload) {
+        if (payload.revision() < snapshotRevision) {
+            ModularPerspective.LOGGER.debug("[perspective] drop stale snapshot revision={} (applied={})",
+                    payload.revision(), snapshotRevision);
+            return;
+        }
+        snapshotRevision = payload.revision();
+        serverHudVisible = payload.hudVisible();
+        for (String id : serverDirectiveIds) {
+            STACK.remove(id);
+        }
+        serverDirectiveIds.clear();
+        for (CameraDirective directive : payload.directives()) {
+            STACK.put(directive);
+            serverDirectiveIds.add(directive.id());
+        }
+        lastResolvedTick = Long.MIN_VALUE;
+        ModularPerspective.LOGGER.info("[perspective] snapshot applied revision={} directives={}",
+                payload.revision(), payload.directives().size());
+    }
     public static boolean isOrtho() {
         return applied != null && applied.orthographic();
     }
@@ -196,7 +264,11 @@ public final class ClientPerspective {
     /** 退出世界/切换维度时清掉本地状态并恢复相机类型。 */
     public static void reset() {
         STACK.clear();
+        serverDirectiveIds.clear();
+        snapshotRevision = -1L;
+        serverHudVisible = null;
         applied = null;
+        previous = null;
         topDown = false;
         initialisedForWorld = false;
         lastResolvedTick = Long.MIN_VALUE;
@@ -208,13 +280,20 @@ public final class ClientPerspective {
 
     // ------------------------------------------------------------------ 渲染接线
 
-    /** 正交投影矩阵：halfH = ZOOM 通道 distance，halfW = aspect*halfH，near=0.05，far 取渲染距离与 padding 较大者（§8.2）。 */
+    /**
+     * 正交投影矩阵：halfH = ZOOM 通道 distance，halfW = aspect*halfH，near=0.05，far = 渲染距离区块（§8.2）。
+     *
+     * <p>far 原按 {@code getDepthFar()}（renderDistance*64）取，正交盒沿视线过长会让转视角时渲染的 section
+     * 数量暴涨而掉帧（m02434）；这里只覆盖实际渲染距离，远处由雾/清屏色收边。
+     */
     public static Matrix4f projectionMatrix(ResolvedCameraState state) {
         Minecraft minecraft = Minecraft.getInstance();
         double aspect = (double) minecraft.getWindow().getWidth() / (double) minecraft.getWindow().getHeight();
         float halfHeight = state.distance() != null ? state.distance() : DEFAULT_TOP_DOWN_DISTANCE;
         float halfWidth = (float) (aspect * halfHeight);
-        float far = Math.max(minecraft.options.getEffectiveRenderDistance() * 16.0F * 4.0F, halfHeight + FAR_PADDING);
+        // m02434 性能修正：原用 getDepthFar()（=renderDistance*64，12 区块时 768），正交盒沿视线拉得过长，
+        // 包含大量 section 导致转视角掉帧；正交只需要看到渲染距离内的地形，far 收到 renderDistance 区块。
+        float far = Math.max(minecraft.options.getEffectiveRenderDistance() * 16.0F, halfHeight + 32.0F);
         return new Matrix4f().ortho(-halfWidth, halfWidth, -halfHeight, halfHeight, NEAR_PLANE, far);
     }
 
@@ -290,8 +369,20 @@ public final class ClientPerspective {
                 Mth.lerp(SMOOTHING, (float) from.z(), (float) to.z()));
     }
 
+    /** 帧级插值（partialTick 0..1）：position 线性（m02619）。 */
+    private static Position3 lerp(Position3 from, Position3 to, float delta) {
+        return new Position3(Mth.lerp(delta, (float) from.x(), (float) to.x()),
+                Mth.lerp(delta, (float) from.y(), (float) to.y()),
+                Mth.lerp(delta, (float) from.z(), (float) to.z()));
+    }
+
     private static float lerp(@Nullable Float from, float to) {
         return from == null ? to : Mth.lerp(SMOOTHING, from, to);
+    }
+
+    /** 帧级插值（partialTick 0..1）：标量通道线性（m02619）。 */
+    private static float lerp(float from, float to, float delta) {
+        return Mth.lerp(delta, from, to);
     }
 
     /** 角度走最短弧（§5.6：ANGLE 通道插值取最短弧）。 */
@@ -300,6 +391,11 @@ public final class ClientPerspective {
             return to;
         }
         return from + Mth.wrapDegrees(to - from) * SMOOTHING;
+    }
+
+    /** 帧级插值（partialTick 0..1）：yaw 走最短弧（m02619）。 */
+    private static float smoothAngle(float from, float to, float delta) {
+        return from + Mth.wrapDegrees(to - from) * delta;
     }
 
     /**
