@@ -59,6 +59,7 @@ public abstract class LevelRendererMixin {
         if (!SectionCuller.isCulling() || SectionCuller.hiddenCount() == 0) {
             return sections.listIterator(index);
         }
+        long filterStart = System.nanoTime();
         ObjectArrayList<SectionRenderDispatcher.RenderSection> filtered = new ObjectArrayList<>(sections.size());
         for (int i = 0; i < sections.size(); i++) {
             SectionRenderDispatcher.RenderSection section = sections.get(i);
@@ -66,6 +67,7 @@ public abstract class LevelRendererMixin {
                 filtered.add(section);
             }
         }
+        SectionCuller.recordFilterNanos(System.nanoTime() - filterStart);
         return filtered.listIterator(index == 0 ? 0 : filtered.size());
     }
 

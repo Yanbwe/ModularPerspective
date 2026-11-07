@@ -103,8 +103,10 @@ public final class DebugHudWidget implements HudWidget {
         lines.add(String.format("policy req=%s sug=%s ortho=%s max=%d",
                 policy.allowRequire(), policy.allowSuggest(), policy.allowOrthographic(),
                 policy.maxDirectives()));
-        lines.add("culling: " + (SectionCuller.isCulling() ? "on" : "off")
-                + " hidden=" + SectionCuller.hiddenCount() + " rays=" + SectionCuller.raysCast());
+        lines.add("cull: " + (SectionCuller.isCulling() ? "on" : "off")
+                + " h=" + SectionCuller.hiddenCount() + " r=" + SectionCuller.raysCast()
+                + " scan=" + SectionCuller.lastScanMicros() + "us/" + SectionCuller.maxScanMicros() + "us");
+        lines.add("filter=" + SectionCuller.lastFilterMicros() + "us/" + SectionCuller.maxFilterMicros() + "us");
         lines.add("HUD: " + ClientHud.widgetCount() + " widget(s)  [点击左上胶囊切换本层]");
         return lines;
     }

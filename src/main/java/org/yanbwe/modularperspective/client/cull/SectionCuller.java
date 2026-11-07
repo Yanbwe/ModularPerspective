@@ -44,6 +44,12 @@ public final class SectionCuller {
     private static long lastRefreshTick = Long.MIN_VALUE;
     private static Vec3 lastCamera = Vec3.ZERO;
     private static long lastPlayerSection = Long.MIN_VALUE;
+    /** Last full rescan cost in microseconds and its observed max (docs §16 M5: scan <= 2 ms/frame). */
+    private static long lastScanMicros;
+    private static long maxScanMicros;
+    /** Last render-list filter cost in microseconds and its observed max (docs §16 M5: filter <= 0.2 ms/frame). */
+    private static long lastFilterMicros;
+    private static long maxFilterMicros;
 
     private SectionCuller() {
     }
@@ -99,6 +105,7 @@ public final class SectionCuller {
         lastRefreshTick = gameTime;
         lastCamera = camera;
         lastPlayerSection = playerKey;
+        long scanStart = System.nanoTime();
 
         SectionPos playerSection = SectionPos.of(minecraft.player.blockPosition());
         long playerSectionKey = playerSection.asLong();
@@ -129,6 +136,34 @@ public final class SectionCuller {
         hiddenCount = HIDDEN.size();
         raysCast = rays;
         culling = true;
+        lastScanMicros = (System.nanoTime() - scanStart) / 1_000L;
+        if (lastScanMicros > maxScanMicros) {
+            maxScanMicros = lastScanMicros;
+        }
+    }
+
+    public static long lastScanMicros() {
+        return lastScanMicros;
+    }
+
+    public static long maxScanMicros() {
+        return maxScanMicros;
+    }
+
+    public static long lastFilterMicros() {
+        return lastFilterMicros;
+    }
+
+    public static long maxFilterMicros() {
+        return maxFilterMicros;
+    }
+
+    /** Reported by LevelRendererMixin for the per-frame visibleSections filter. */
+    public static void recordFilterNanos(long nanos) {
+        lastFilterMicros = nanos / 1_000L;
+        if (lastFilterMicros > maxFilterMicros) {
+            maxFilterMicros = lastFilterMicros;
+        }
     }
 
     private static void castRay(Level level, Vec3 from, Vec3 to, long playerSectionKey, LongOpenHashSet hidden) {

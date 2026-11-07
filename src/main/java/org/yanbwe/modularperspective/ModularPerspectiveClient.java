@@ -491,8 +491,8 @@ public final class ModularPerspectiveClient {
 
     /**
      * M5 剔除自动验收（marker {@code m5-auto.marker}，§16 M5、§11）：
-     * 用命令把玩家埋进实心石头并挖出一个小空腔（相机位于石头里），
-     * 记录 culling 开/关时的隐藏 section 数并各截一张图，然后恢复配置。
+     * 在相机与玩家之间搭不同尺寸的客户端石墙，做 5 个场景（平地 / 矮墙 / 高墙 / 宽高墙 / 剔除关），
+     * 每个场景截图并输出 hidden/rays/scan/filter 耗时，用于 §16 M5 的可执行验收。
      */
     private static void runM5Verification(Minecraft minecraft) {
         if (autoTicks < AUTO_ENABLE_AT) {
@@ -509,7 +509,7 @@ public final class ModularPerspectiveClient {
                 runServerCommand(minecraft, "tp @s 290 ~ 290");
                 autoPhase = 1;
                 autoPhaseTick = autoTicks;
-                ModularPerspective.LOGGER.info("[auto] M5 phase0: preparing scene (pauseOnLostFocus=false)");
+                ModularPerspective.LOGGER.info("[auto] M5 phase0: scene setup near section boundary");
             }
             case 1 -> {
                 if (autoTicks - autoPhaseTick >= 20) {
@@ -518,48 +518,75 @@ public final class ModularPerspectiveClient {
                         minecraft.player.setXRot(0.0F);
                     }
                     BlockPos base = minecraft.player.blockPosition();
-                    int cleared = clearSceneArea(minecraft, base);
-                    int built = buildStoneWall(minecraft, base);
+                    clearSceneArea(minecraft, base);
                     autoPhase = 2;
                     autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info(
-                            "[auto] M5 phase1: scene at {} (cleared {} blocks, wall {} blocks)", base, cleared, built);
+                    ModularPerspective.LOGGER.info("[auto] M5 scene1 (flat): base={}", base);
                 }
             }
             case 2 -> {
-                if (autoTicks - autoPhaseTick >= 20) {
-                    grabScreenshot(minecraft, "m5-culled.png");
-                    ModularPerspective.LOGGER.info("[auto] M5 phase2 (culled): culling={} hidden={} rays={}",
-                            SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast());
-                    Config.CULLING_ENABLED.set(false);
-                    SectionCuller.invalidate();
+                if (autoTicks - autoPhaseTick >= 15) {
+                    screenshotAndLog(minecraft, "m5-scene1.png", "flat");
+                    BlockPos base = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, base);
+                    buildWall(minecraft, base, 3, 8, 2);
                     autoPhase = 3;
                     autoPhaseTick = autoTicks;
                 }
             }
             case 3 -> {
-                if (autoTicks - autoPhaseTick >= 10) {
-                    grabScreenshot(minecraft, "m5-off.png");
-                    ModularPerspective.LOGGER.info("[auto] M5 phase3 (culling off): culling={} hidden={} rays={}",
-                            SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast());
-                    Config.CULLING_ENABLED.set(true);
-                    SectionCuller.invalidate();
+                if (autoTicks - autoPhaseTick >= 15) {
+                    screenshotAndLog(minecraft, "m5-scene2.png", "wall-3x8");
+                    BlockPos base = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, base);
+                    buildWall(minecraft, base, 3, 16, 2);
                     autoPhase = 4;
                     autoPhaseTick = autoTicks;
                 }
             }
             case 4 -> {
-                if (autoTicks - autoPhaseTick >= 10) {
-                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
-                    ModularPerspective.LOGGER.info("[auto] M5 verification finished: culling={} hidden={} rays={}",
-                            SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast());
+                if (autoTicks - autoPhaseTick >= 15) {
+                    screenshotAndLog(minecraft, "m5-scene3.png", "wall-3x16");
+                    BlockPos base = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, base);
+                    buildWall(minecraft, base, 10, 16, 2);
                     autoPhase = 5;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 5 -> {
+                if (autoTicks - autoPhaseTick >= 15) {
+                    screenshotAndLog(minecraft, "m5-scene4.png", "wall-10x16");
+                    Config.CULLING_ENABLED.set(false);
+                    SectionCuller.invalidate();
+                    autoPhase = 6;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 6 -> {
+                if (autoTicks - autoPhaseTick >= 15) {
+                    screenshotAndLog(minecraft, "m5-scene5.png", "culling-off");
+                    Config.CULLING_ENABLED.set(true);
+                    SectionCuller.invalidate();
+                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
+                    autoPhase = 7;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M5 verification finished");
                 }
             }
             default -> {
                 // 完成：不再动作。
             }
         }
+    }
+
+    /** 截图并输出 M5 场景统计（hidden/rays/扫描耗时/过滤耗时）。 */
+    private static void screenshotAndLog(Minecraft minecraft, String file, String label) {
+        grabScreenshot(minecraft, file);
+        ModularPerspective.LOGGER.info("[auto] M5 {}: culling={} hidden={} rays={} scan={}us/{}us filter={}us/{}us",
+                label, SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast(),
+                SectionCuller.lastScanMicros(), SectionCuller.maxScanMicros(),
+                SectionCuller.lastFilterMicros(), SectionCuller.maxFilterMicros());
     }
 
     /**
@@ -598,7 +625,7 @@ public final class ModularPerspectiveClient {
             for (int dz = -10; dz <= 10; dz++) {
                 minecraft.level.setBlock(base.offset(dx, -1, dz), Blocks.GRASS_BLOCK.defaultBlockState(), 3);
                 count++;
-                for (int dy = 0; dy <= 8; dy++) {
+                for (int dy = 0; dy <= 15; dy++) {
                     minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.AIR.defaultBlockState(), 3);
                     count++;
                 }
@@ -608,21 +635,21 @@ public final class ModularPerspectiveClient {
     }
 
     /**
-     * 在相机与玩家之间搭一堵 7×8×2 的石墙（仅客户端方块，开发期剔除验收用）。
+     * 在相机与玩家之间搭石墙（仅客户端方块，开发期剔除验收用）。
      *
-     * <p>相机在玩家身后约 4.24 格（pitch=45°、distance=6），墙放在 z-4..z-3，正好横在视线中间：
-     * 不剔除时应看到石墙，截面级剔除生效后石墙所在 section 被隐藏、应重新看到玩家。
+     * <p>相机在玩家身后约 4.24 格（pitch=45°、distance=6），墙放在 z-4 起的 {@code depth} 格内，
+     * 横向覆盖 {@code ±halfWidth}、纵向 {@code height} 格；不同尺寸会命中不同数量的 16³ section。
      *
      * @return 放置的方块数
      */
-    private static int buildStoneWall(Minecraft minecraft, BlockPos base) {
+    private static int buildWall(Minecraft minecraft, BlockPos base, int halfWidth, int height, int depth) {
         if (minecraft.level == null) {
             return 0;
         }
         int count = 0;
-        for (int dx = -3; dx <= 3; dx++) {
-            for (int dy = 0; dy <= 7; dy++) {
-                for (int dz = -4; dz <= -3; dz++) {
+        for (int dx = -halfWidth; dx <= halfWidth; dx++) {
+            for (int dy = 0; dy < height; dy++) {
+                for (int dz = -4; dz < -4 + depth; dz++) {
                     minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
                     count++;
                 }
