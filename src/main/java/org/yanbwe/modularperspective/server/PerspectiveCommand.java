@@ -154,6 +154,9 @@ public final class PerspectiveCommand {
         targets.then(Commands.literal("locks")
                 .then(Commands.argument("locks", StringArgumentType.greedyString())
                         .executes(ctx -> camera(ctx, OPT_LOCKS))));
+        // 链式写法：camera <targets> <option> <option> ...（顺序与 README 一致，locks 只吃剩余 token 所以必须最后）。
+        targets.then(Commands.argument("options", StringArgumentType.greedyString())
+                .executes(ctx -> cameraFromOptions(ctx, StringArgumentType.getString(ctx, "options"))));
         return targets;
     }
 
@@ -241,6 +244,123 @@ public final class PerspectiveCommand {
             }
         }
 
+        return pushCamera(ctx, targets, position, yaw, pitch, distance, fov, projection, duration, priority,
+                enforcement, locks);
+    }
+
+    /**
+     * 链式 camera 选项解析：{@code camera <targets> <option> <value> <option> ...}。
+     *
+     * <p>用于一条命令同时下发多个通道（如 rotation + duration、distance + priority）。扁平命名分支更适合补全，
+     * 贪婪字符串分支覆盖组合场景；两条路径最终都走 {@link #pushCamera}。顺序不限，{@code locks} 必须最后（它会吃掉剩余 token）。</p>
+     */
+    private static int cameraFromOptions(CommandContext<CommandSourceStack> ctx, String raw) throws CommandSyntaxException {
+        Collection<ServerPlayer> targets = EntityArgument.getPlayers(ctx, "targets");
+        String[] tokens = raw.trim().split("\\s+");
+        Position3 position = null;
+        Float yaw = null;
+        Float pitch = null;
+        Float distance = null;
+        Float fov = null;
+        Projection projection = null;
+        int duration = DEFAULT_DURATION;
+        int priority = DEFAULT_PRIORITY;
+        Enforcement enforcement = Enforcement.SUGGEST;
+        EnumSet<InputLock> locks = null;
+        int index = 0;
+        try {
+            while (index < tokens.length) {
+                String option = tokens[index++].toLowerCase(Locale.ROOT);
+                switch (option) {
+                    case "position" -> {
+                        double x = parseDouble(tokens[index++]);
+                        double y = parseDouble(tokens[index++]);
+                        double z = parseDouble(tokens[index++]);
+                        if (Math.abs(x) > 30_000_000.0D || Math.abs(y) > 30_000_000.0D || Math.abs(z) > 30_000_000.0D) {
+                            return failure(ctx, "position coordinate out of range");
+                        }
+                        position = new Position3(x, y, z);
+                    }
+                    case "rotation" -> {
+                        yaw = (float) parseDouble(tokens[index++]);
+                        pitch = (float) parseDouble(tokens[index++]);
+                    }
+                    case "distance" -> {
+                        distance = (float) parseDouble(tokens[index++]);
+                        if (distance < 1.0F || distance > 32.0F) {
+                            return failure(ctx, "distance must be between 1 and 32");
+                        }
+                    }
+                    case "fov" -> {
+                        fov = (float) parseDouble(tokens[index++]);
+                        if (fov < 30.0F || fov > 110.0F) {
+                            return failure(ctx, "fov must be between 30 and 110");
+                        }
+                    }
+                    case "projection" -> {
+                        String value = tokens[index++].toLowerCase(Locale.ROOT);
+                        if (value.equals("perspective")) {
+                            projection = Projection.PERSPECTIVE;
+                        } else if (value.equals("orthographic")) {
+                            projection = Projection.ORTHOGRAPHIC;
+                        } else {
+                            return failure(ctx, "projection must be perspective or orthographic");
+                        }
+                    }
+                    case "duration" -> {
+                        duration = parseInt(tokens[index++]);
+                        if (duration < 1 || duration > 24000) {
+                            return failure(ctx, "duration must be between 1 and 24000");
+                        }
+                    }
+                    case "priority" -> {
+                        priority = parseInt(tokens[index++]);
+                        if (priority < 0 || priority > 1000) {
+                            return failure(ctx, "priority must be between 0 and 1000");
+                        }
+                    }
+                    case "enforcement" -> {
+                        String value = tokens[index++].toLowerCase(Locale.ROOT);
+                        if (value.equals("suggest")) {
+                            enforcement = Enforcement.SUGGEST;
+                        } else if (value.equals("require")) {
+                            enforcement = Enforcement.REQUIRE;
+                        } else {
+                            return failure(ctx, "enforcement must be suggest or require");
+                        }
+                    }
+                    case "locks" -> {
+                        StringBuilder remaining = new StringBuilder();
+                        while (index < tokens.length) {
+                            if (!remaining.isEmpty()) {
+                                remaining.append(' ');
+                            }
+                            remaining.append(tokens[index++]);
+                        }
+                        locks = parseLocks(ctx, remaining.toString());
+                        if (locks == null) {
+                            return 0;
+                        }
+                    }
+                    default -> {
+                        return failure(ctx, "unknown camera option '" + option + "'");
+                    }
+                }
+            }
+        } catch (ArrayIndexOutOfBoundsException exception) {
+            return failure(ctx, "missing value for camera option");
+        } catch (NumberFormatException exception) {
+            return failure(ctx, "invalid number '" + exception.getMessage() + "'");
+        }
+        return pushCamera(ctx, targets, position, yaw, pitch, distance, fov, projection, duration, priority,
+                enforcement, locks);
+    }
+
+    /** 统一推送入口：构造通道/CameraTarget 并逐玩家 push；position..locks 全空时报错。 */
+    private static int pushCamera(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets,
+                                  Position3 position, Float yaw, Float pitch, Float distance, Float fov,
+                                  Projection projection, int duration, int priority, Enforcement enforcement,
+                                  EnumSet<InputLock> locks) {
         EnumSet<CameraChannel> channels = EnumSet.noneOf(CameraChannel.class);
         if (position != null) {
             channels.add(CameraChannel.POSITION);
@@ -266,18 +386,15 @@ public final class PerspectiveCommand {
             return 0;
         }
         CameraTarget value = new CameraTarget(position, yaw, pitch, distance, fov, projection, null, locks);
-        final int finalDuration = duration;
-        final int finalPriority = priority;
-        final Enforcement finalEnforcement = enforcement;
         int pushed = 0;
         for (ServerPlayer target : targets) {
             try {
-                CameraDirective directive = PerspectiveServer.push(target, COMMAND_DIRECTIVE_ID, finalPriority,
-                        finalEnforcement, channels, value, finalDuration, false, true);
+                CameraDirective directive = PerspectiveServer.push(target, COMMAND_DIRECTIVE_ID, priority,
+                        enforcement, channels, value, duration, false, true);
                 ModularPerspective.LOGGER.info("[perspective] command camera -> {} id={} seq={} priority={} enforcement={} "
                                 + "duration={} channels={} locks={}",
-                        target.getGameProfile().getName(), directive.id(), directive.seq(), finalPriority,
-                        finalEnforcement, finalDuration, channels, locks);
+                        target.getGameProfile().getName(), directive.id(), directive.seq(), priority,
+                        enforcement, duration, channels, locks);
                 pushed++;
             } catch (IllegalArgumentException exception) {
                 ctx.getSource().sendFailure(Component.literal("perspective: " + exception.getMessage()));
@@ -287,6 +404,19 @@ public final class PerspectiveCommand {
         int count = pushed;
         ctx.getSource().sendSuccess(() -> Component.literal("Pushed perspective directive to " + count + " player(s)"), false);
         return count;
+    }
+
+    private static int failure(CommandContext<CommandSourceStack> ctx, String message) {
+        ctx.getSource().sendFailure(Component.literal("perspective: " + message));
+        return 0;
+    }
+
+    private static double parseDouble(String raw) {
+        return Double.parseDouble(raw);
+    }
+
+    private static int parseInt(String raw) {
+        return Integer.parseInt(raw);
     }
 
     /** 解析 locks 贪婪字符串（空格/逗号分隔；all 展开三位）；非法值返回 null 并 sendFailure。 */
