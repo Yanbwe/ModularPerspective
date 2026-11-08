@@ -12,6 +12,7 @@ import org.yanbwe.modularperspective.ModularPerspective;
 import org.yanbwe.modularperspective.api.camera.CameraChannel;
 import org.yanbwe.modularperspective.api.camera.CameraDirective;
 import org.yanbwe.modularperspective.api.camera.CameraTarget;
+import org.yanbwe.modularperspective.api.camera.DirectiveLifecycle;
 import org.yanbwe.modularperspective.api.camera.Easing;
 import org.yanbwe.modularperspective.api.camera.EndReason;
 import org.yanbwe.modularperspective.api.camera.Enforcement;
@@ -128,8 +129,13 @@ public final class PerspectiveServer {
         long now = server.overworld().getGameTime();
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             PerspectiveAttachment state = state(player);
-            boolean changed = state.directives().removeIf(directive -> directive.expired(now));
-            if (changed) {
+            List<CameraDirective> expired = DirectiveLifecycle.expired(state.directives(), now);
+            if (!expired.isEmpty()) {
+                state.directives().removeAll(expired);
+                for (CameraDirective directive : expired) {
+                    ModularPerspective.LOGGER.info("[perspective] directive {} ended ({})",
+                            directive.id(), EndReason.EXPIRED);
+                }
                 state.markDirty();
             }
             if (state.dirty()) {
@@ -177,19 +183,14 @@ public final class PerspectiveServer {
             return;
         }
         PerspectiveAttachment state = state(player);
-        List<CameraDirective> ended = new ArrayList<>();
-        state.directives().removeIf(directive -> {
-            if (directive.keepOnDeath()) {
-                return false;
-            }
-            ended.add(directive);
-            return true;
-        });
-        for (CameraDirective directive : ended) {
+        DirectiveLifecycle.RespawnResult result = DirectiveLifecycle.retainOnRespawn(state.directives());
+        state.directives().clear();
+        state.directives().addAll(result.kept());
+        for (CameraDirective directive : result.ended()) {
             ModularPerspective.LOGGER.info("[perspective] directive {} ended ({}) after respawn of {}",
                     directive.id(), EndReason.OWNER_DIED, player.getGameProfile().getName());
         }
-        if (!ended.isEmpty()) {
+        if (!result.ended().isEmpty()) {
             state.markDirty();
         }
         sendFullSnapshot(player);

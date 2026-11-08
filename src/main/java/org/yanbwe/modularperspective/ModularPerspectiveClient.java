@@ -310,8 +310,10 @@ public final class ModularPerspectiveClient {
 
     /**
      * M3 双端链自动验收（marker {@code m3-auto.marker}）：用真实命令跑
-     * {@code /perspective camera @s 0 45 duration 200} → 服务端下发快照 → 客户端应用（正交生效）；
-     * 再 {@code /perspective clear @s} → 快照清空（回到原版视角），各阶段截图。
+     * {@code /perspective preset @s top-down duration 200} → 服务端下发快照 → 客户端应用（正交生效）；
+     * {@code /perspective camera @s rotation 0 45 duration 100}（命名子参数完整命令面）；
+     * 再 {@code /perspective clear @s} → 快照清空（回到原版视角）；
+     * 最后用短 duration 指令验证到期清理（server 日志 {@code ended (EXPIRED)} + 客户端栈空），各阶段截图。
      */
     private static void runM3Verification(Minecraft minecraft) {
         if (autoTicks < AUTO_ENABLE_AT) {
@@ -319,7 +321,7 @@ public final class ModularPerspectiveClient {
         }
         if (autoPhase == 0) {
             ClientPerspective.setTopDown(false);
-            runServerCommand(minecraft, "perspective preset @s top-down 200");
+            runServerCommand(minecraft, "perspective preset @s top-down duration 200");
             autoPhase = 1;
             autoPhaseTick = autoTicks;
             ModularPerspective.LOGGER.info("[auto] M3 phase1: preset command sent");
@@ -331,7 +333,7 @@ public final class ModularPerspectiveClient {
             case 1 -> {
                 // 等快照真正生效（服务器失焦暂停时可能延迟），再截图并发 requiresAck 指令。
                 if (state != null && state.orthographic()) {
-                    runServerCommand(minecraft, "perspective camera @s 0 45 100");
+                    runServerCommand(minecraft, "perspective camera @s rotation 0 45 duration 100");
                     autoPhase = 22;
                     autoPhaseTick = autoTicks;
                     ModularPerspective.LOGGER.info("[auto] M3 phase2: preset applied, ack camera sent; locks={}",
@@ -372,7 +374,7 @@ public final class ModularPerspectiveClient {
             case 4 -> {
                 if (autoTicks - autoPhaseTick >= 10) {
                     // 策略禁止 SUGGEST 后 push 应失败（命令层 sendFailure，聊天栏 "SUGGEST is not allowed"）。
-                    runServerCommand(minecraft, "perspective camera @s 0 45 20");
+                    runServerCommand(minecraft, "perspective camera @s rotation 0 45 duration 20");
                     autoPhase = 5;
                     autoPhaseTick = autoTicks;
                     ModularPerspective.LOGGER.info("[auto] M3 phase5: policy rejection test sent");
@@ -397,14 +399,38 @@ public final class ModularPerspectiveClient {
             case 7 -> {
                 if (autoTicks - autoPhaseTick >= 20) {
                     grabScreenshot(minecraft, "m3-cleared.png");
+                    runServerCommand(minecraft, "perspective camera @s rotation 0 45 duration 20");
                     autoPhase = 8;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase8: short directive sent for expiry test");
+                }
+            }
+            case 8 -> {
+                // 等短指令快照到达，再等 duration=20 到期（服务端会打 ended (EXPIRED)）。
+                if (ClientPerspective.directiveView().size() >= 1) {
+                    autoPhase = 9;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M3 phase9: short directive applied (rev={}), waiting expiry",
+                            ClientPerspective.snapshotRevision());
+                } else if (autoTicks - autoPhaseTick > 120) {
+                    autoPhase = 9;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.warn("[auto] M3 phase9: short directive never arrived");
+                }
+            }
+            case 9 -> {
+                if (autoTicks - autoPhaseTick >= 40) {
+                    int remaining = ClientPerspective.directiveView().size();
+                    boolean ortho = ClientPerspective.isOrtho();
+                    grabScreenshot(minecraft, "m3-expired.png");
+                    autoPhase = 10;
+                    ModularPerspective.LOGGER.info("[auto] M3 expiry: directives={} ortho={} rev={}",
+                            remaining, ortho, ClientPerspective.snapshotRevision());
                     ModularPerspective.LOGGER.info("[auto] M3 verification finished (topDown={} ortho={})",
-                            ClientPerspective.isTopDown(), ClientPerspective.isOrtho());
+                            ClientPerspective.isTopDown(), ortho);
                 }
             }
             default -> {
-
-
                 // 完成：不再动作。
             }
         }
@@ -814,7 +840,7 @@ public final class ModularPerspectiveClient {
      */
     private static void runPersistVerification(Minecraft minecraft) {
         if (autoTicks == AUTO_ENABLE_AT) {
-            runServerCommand(minecraft, "perspective camera @s 0 45 2400");
+            runServerCommand(minecraft, "perspective camera @s rotation 0 45 duration 2400");
             ModularPerspective.LOGGER.info("[auto] M3 persist: camera command sent");
         } else if (autoTicks == AUTO_SHOT_ON_AT) {
             net.minecraft.server.MinecraftServer server = minecraft.getSingleplayerServer();
@@ -995,8 +1021,8 @@ public final class ModularPerspectiveClient {
             ModularPerspective.LOGGER.warn("[auto] M3 server player missing; skipped: {}", command);
             return;
         }
-        server.getCommands().performPrefixedCommand(
-                player.createCommandSourceStack().withPermission(4), command);
+        net.minecraft.commands.CommandSourceStack source = player.createCommandSourceStack().withPermission(4);
+        server.getCommands().performPrefixedCommand(source, command);
     }
     private static void moveCursor(Minecraft minecraft, double nx, double ny) {
         GLFW.glfwSetCursorPos(minecraft.getWindow().getWindow(),

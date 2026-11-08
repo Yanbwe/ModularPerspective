@@ -4,11 +4,16 @@ import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.FloatArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.ArgumentBuilder;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.builder.RequiredArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Locale;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.arguments.EntityArgument;
@@ -32,16 +37,22 @@ import org.yanbwe.modularperspective.api.camera.Projection;
  *
  * <p>语法（命令只操作 SERVER 来源的指令；本地 F4/F6 预设不受影响）：
  * <pre>
- * /perspective camera &lt;targets&gt; &lt;yaw&gt; &lt;pitch&gt; [duration]
- * /perspective preset &lt;targets&gt; &lt;top-down|reset&gt; [duration]
+ * /perspective camera &lt;targets&gt; [position &lt;x&gt; &lt;y&gt; &lt;z&gt;] [rotation &lt;yaw&gt; &lt;pitch&gt;]
+ *                     [distance &lt;blocks&gt;] [fov &lt;degrees&gt;]
+ *                     [projection &lt;perspective|orthographic&gt;] [duration &lt;ticks&gt;]
+ *                     [priority &lt;0-1000&gt;] [enforcement &lt;suggest|require&gt;]
+ *                     [locks &lt;rotate|zoom|move|all&gt;...]
+ * /perspective preset &lt;targets&gt; &lt;top-down|reset&gt; [duration &lt;ticks&gt;]
  * /perspective lock &lt;targets&gt; &lt;rotate|zoom|move|all&gt; &lt;on|off&gt;
- * /perspective hud &lt;targets&gt; &lt;on|off&gt; [duration]
+ * /perspective hud &lt;targets&gt; &lt;on|off&gt; [duration &lt;ticks&gt;]
+ * /perspective policy &lt;targets&gt; &lt;flag&gt; ... | maxDirectives &lt;n&gt; | maxDistance &lt;d&gt; | query
  * /perspective clear &lt;targets&gt;
  * /perspective query &lt;targets&gt;
  * </pre>
+ * {@code camera} 的每个子参数都是命名子参数，按上述**固定顺序**省略或给出（Brigadier 不支持无序可选参数）；
+ * {@code locks} 是贪婪字符串，必须是最后一个子参数，可写多个位（空格/逗号分隔，{@code all} 展开三位）。
+ * 至少给出一个 camera 选项，否则报错。{@code camera}/{@code preset top-down} 的落位与客户端本地预设一致。
  * 权限：等级 ≥ 2（{@code Commands.LEVEL_GAMEMASTERS}）；错误走 {@link CommandSyntaxException}/sendFailure。
- * {@code camera}/{@code preset top-down} 的落位与客户端本地预设一致：从玩家眼睛沿 forward 退 distance，
- * 正交投影、pitch 45° 默认观察；{@code preset} 额外锁 ROTATE+ZOOM（§12）。
  */
 public final class PerspectiveCommand {
     /** 命令产生的指令 id：重复执行同 id → 替换旧指令（§5.2）。 */
@@ -53,37 +64,32 @@ public final class PerspectiveCommand {
     private static final int DEFAULT_PRIORITY = 100;
     private static final int PRESET_PRIORITY = 100;
 
+    /** camera 子参数个数（顺序即 Brigadier 语法顺序，见类注释）。 */
+    private static final int CAMERA_OPTION_COUNT = 9;
+    private static final int OPT_POSITION = 1;
+    private static final int OPT_ROTATION = 1 << 1;
+    private static final int OPT_DISTANCE = 1 << 2;
+    private static final int OPT_FOV = 1 << 3;
+    private static final int OPT_PROJECTION = 1 << 4;
+    private static final int OPT_DURATION = 1 << 5;
+    private static final int OPT_PRIORITY = 1 << 6;
+    private static final int OPT_ENFORCEMENT = 1 << 7;
+    private static final int OPT_LOCKS = 1 << 8;
+
     private PerspectiveCommand() {}
 
     public static void register(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
+        com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> cameraLiteral =
+                Commands.literal("camera");
+        cameraLiteral.then(cameraTargets());
         dispatcher.register(Commands.literal("perspective")
                 .requires(PerspectiveCommand::mayControl)
-                .then(Commands.literal("camera")
-                        .then(Commands.argument("targets", EntityArgument.players())
-                                .then(Commands.argument("yaw", FloatArgumentType.floatArg(-180.0F, 180.0F))
-                                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(-90.0F, 90.0F))
-                                                .executes(ctx -> camera(ctx, EntityArgument.getPlayers(ctx, "targets"),
-                                                        FloatArgumentType.getFloat(ctx, "yaw"),
-                                                        FloatArgumentType.getFloat(ctx, "pitch"), DEFAULT_DURATION))
-                                                .then(Commands.argument("duration",
-                                                                IntegerArgumentType.integer(1, 24000))
-                                                        .executes(ctx -> camera(ctx,
-                                                                EntityArgument.getPlayers(ctx, "targets"),
-                                                                FloatArgumentType.getFloat(ctx, "yaw"),
-                                                                FloatArgumentType.getFloat(ctx, "pitch"),
-                                                                IntegerArgumentType.getInteger(ctx, "duration"))))))))
+                .then(cameraLiteral)
                 .then(Commands.literal("preset")
                         .then(Commands.argument("targets", EntityArgument.players())
-                                .then(Commands.literal("top-down")
-                                        .executes(ctx -> preset(ctx, EntityArgument.getPlayers(ctx, "targets"), true,
-                                                DEFAULT_DURATION))
-                                        .then(Commands.argument("duration", IntegerArgumentType.integer(1, 24000))
-                                                .executes(ctx -> preset(ctx, EntityArgument.getPlayers(ctx, "targets"),
-                                                        true, IntegerArgumentType.getInteger(ctx, "duration")))))
-                                .then(Commands.literal("reset")
-                                        .executes(ctx -> preset(ctx, EntityArgument.getPlayers(ctx, "targets"), false,
-                                                DEFAULT_DURATION)))))
+                                .then(presetMode("top-down", true))
+                                .then(presetMode("reset", false))))
                 .then(Commands.literal("lock")
                         .then(Commands.argument("targets", EntityArgument.players())
                                 .then(lockChoices("rotate"))
@@ -92,18 +98,8 @@ public final class PerspectiveCommand {
                                 .then(lockChoices("all"))))
                 .then(Commands.literal("hud")
                         .then(Commands.argument("targets", EntityArgument.players())
-                                .then(Commands.literal("on")
-                                        .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"), true,
-                                                DEFAULT_DURATION))
-                                        .then(Commands.argument("duration", IntegerArgumentType.integer(1, 24000))
-                                                .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"),
-                                                        true, IntegerArgumentType.getInteger(ctx, "duration")))))
-                                .then(Commands.literal("off")
-                                        .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"), false,
-                                                DEFAULT_DURATION))
-                                        .then(Commands.argument("duration", IntegerArgumentType.integer(1, 24000))
-                                                .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"),
-                                                        false, IntegerArgumentType.getInteger(ctx, "duration")))))))
+                                .then(hudMode("on", true))
+                                .then(hudMode("off", false))))
                 .then(Commands.literal("policy")
                         .then(Commands.argument("targets", EntityArgument.players())
                                 .then(policyFlag("allowRequire", 0))
@@ -130,31 +126,158 @@ public final class PerspectiveCommand {
         ModularPerspective.LOGGER.debug("[{}] /perspective registered (M3)", ModularPerspective.MODID);
     }
 
-    /** lock 子命令：{@code ... <bit> on|off}。 */
-    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> lockChoices(String lockName) {
-        return Commands.literal(lockName)
-                .then(Commands.literal("on")
-                        .executes(ctx -> lock(ctx, EntityArgument.getPlayers(ctx, "targets"), lockName, true)))
-                .then(Commands.literal("off")
-                        .executes(ctx -> lock(ctx, EntityArgument.getPlayers(ctx, "targets"), lockName, false)));
+    // ------------------------------------------------------------------ camera 命名子参数
+
+    /** targets 节点：挂上 camera 的命名子参数分支（每条分支独立 executes，避免链式 builder 复用问题）。 */
+    private static ArgumentBuilder<CommandSourceStack, ?> cameraTargets() {
+        var targets = Commands.argument("targets", EntityArgument.players());
+        targets.then(positionOptions());
+        targets.then(rotationOptions());
+        targets.then(Commands.literal("distance")
+                .then(Commands.argument("blocks", DoubleArgumentType.doubleArg(1.0D, 32.0D))
+                        .executes(ctx -> camera(ctx, OPT_DISTANCE))));
+        targets.then(Commands.literal("fov")
+                .then(Commands.argument("degrees", DoubleArgumentType.doubleArg(30.0D, 110.0D))
+                        .executes(ctx -> camera(ctx, OPT_FOV))));
+        targets.then(Commands.literal("projection")
+                .then(Commands.argument("projection", StringArgumentType.word())
+                        .executes(ctx -> camera(ctx, OPT_PROJECTION))));
+        targets.then(Commands.literal("duration")
+                .then(Commands.argument("ticks", IntegerArgumentType.integer(1, 24000))
+                        .executes(ctx -> camera(ctx, OPT_DURATION))));
+        targets.then(Commands.literal("priority")
+                .then(Commands.argument("priority", IntegerArgumentType.integer(0, 1000))
+                        .executes(ctx -> camera(ctx, OPT_PRIORITY))));
+        targets.then(Commands.literal("enforcement")
+                .then(Commands.argument("enforcement", StringArgumentType.word())
+                        .executes(ctx -> camera(ctx, OPT_ENFORCEMENT))));
+        targets.then(Commands.literal("locks")
+                .then(Commands.argument("locks", StringArgumentType.greedyString())
+                        .executes(ctx -> camera(ctx, OPT_LOCKS))));
+        return targets;
     }
 
-    private static boolean mayControl(CommandSourceStack source) {
-        return source.hasPermission(Commands.LEVEL_GAMEMASTERS);
+    private static LiteralArgumentBuilder<CommandSourceStack> positionOptions() {
+        return Commands.literal("position")
+                .then(Commands.argument("x", DoubleArgumentType.doubleArg(-30_000_000.0D, 30_000_000.0D))
+                        .then(Commands.argument("y", DoubleArgumentType.doubleArg(-30_000_000.0D, 30_000_000.0D))
+                                .then(Commands.argument("z", DoubleArgumentType.doubleArg(-30_000_000.0D, 30_000_000.0D))
+                                        .executes(ctx -> camera(ctx, OPT_POSITION)))));
     }
 
-    // ------------------------------------------------------------------ camera / preset
+    private static LiteralArgumentBuilder<CommandSourceStack> rotationOptions() {
+        return Commands.literal("rotation")
+                .then(Commands.argument("yaw", FloatArgumentType.floatArg(-1_000_000.0F, 1_000_000.0F))
+                        .then(Commands.argument("pitch", FloatArgumentType.floatArg(-90.0F, 90.0F))
+                                .executes(ctx -> camera(ctx, OPT_ROTATION))
+                                .then(Commands.literal("duration")
+                                        .then(Commands.argument("ticks", IntegerArgumentType.integer(1, 24000))
+                                                .executes(ctx -> camera(ctx, OPT_ROTATION | OPT_DURATION))))));
+    }
+    private static int camera(CommandContext<CommandSourceStack> ctx, int mask) throws CommandSyntaxException {
+        Collection<ServerPlayer> targets = EntityArgument.getPlayers(ctx, "targets");
+        if (mask == 0) {
+            ctx.getSource().sendFailure(Component.literal("perspective: at least one camera option is required"));
+            return 0;
+        }
+        Position3 position = null;
+        Float yaw = null;
+        Float pitch = null;
+        Float distance = null;
+        Float fov = null;
+        Projection projection = null;
+        int duration = DEFAULT_DURATION;
+        int priority = DEFAULT_PRIORITY;
+        Enforcement enforcement = Enforcement.SUGGEST;
+        EnumSet<InputLock> locks = null;
+        if ((mask & OPT_POSITION) != 0) {
+            position = new Position3(DoubleArgumentType.getDouble(ctx, "x"),
+                    DoubleArgumentType.getDouble(ctx, "y"), DoubleArgumentType.getDouble(ctx, "z"));
+        }
+        if ((mask & OPT_ROTATION) != 0) {
+            yaw = FloatArgumentType.getFloat(ctx, "yaw");
+            pitch = FloatArgumentType.getFloat(ctx, "pitch");
+        }
+        if ((mask & OPT_DISTANCE) != 0) {
+            distance = (float) DoubleArgumentType.getDouble(ctx, "blocks");
+        }
+        if ((mask & OPT_FOV) != 0) {
+            fov = (float) DoubleArgumentType.getDouble(ctx, "degrees");
+        }
+        if ((mask & OPT_PROJECTION) != 0) {
+            String raw = StringArgumentType.getString(ctx, "projection").toLowerCase(Locale.ROOT);
+            if (raw.equals("perspective")) {
+                projection = Projection.PERSPECTIVE;
+            } else if (raw.equals("orthographic")) {
+                projection = Projection.ORTHOGRAPHIC;
+            } else {
+                ctx.getSource().sendFailure(Component.literal(
+                        "perspective: projection must be perspective or orthographic"));
+                return 0;
+            }
+        }
+        if ((mask & OPT_DURATION) != 0) {
+            duration = IntegerArgumentType.getInteger(ctx, "ticks");
+        }
+        if ((mask & OPT_PRIORITY) != 0) {
+            priority = IntegerArgumentType.getInteger(ctx, "priority");
+        }
+        if ((mask & OPT_ENFORCEMENT) != 0) {
+            String raw = StringArgumentType.getString(ctx, "enforcement").toLowerCase(Locale.ROOT);
+            if (raw.equals("suggest")) {
+                enforcement = Enforcement.SUGGEST;
+            } else if (raw.equals("require")) {
+                enforcement = Enforcement.REQUIRE;
+            } else {
+                ctx.getSource().sendFailure(Component.literal(
+                        "perspective: enforcement must be suggest or require"));
+                return 0;
+            }
+        }
+        if ((mask & OPT_LOCKS) != 0) {
+            locks = parseLocks(ctx, StringArgumentType.getString(ctx, "locks"));
+            if (locks == null) {
+                return 0;
+            }
+        }
 
-    private static int camera(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets,
-                              float yaw, float pitch, int duration) {
+        EnumSet<CameraChannel> channels = EnumSet.noneOf(CameraChannel.class);
+        if (position != null) {
+            channels.add(CameraChannel.POSITION);
+        }
+        if (yaw != null || pitch != null) {
+            channels.add(CameraChannel.ANGLE);
+        }
+        if (distance != null) {
+            channels.add(CameraChannel.ZOOM);
+        }
+        if (fov != null) {
+            channels.add(CameraChannel.FOV);
+        }
+        if (projection != null) {
+            channels.add(CameraChannel.PROJECTION);
+        }
+        if (locks != null && !locks.isEmpty()) {
+            // §5.3：锁位只有挂到 INPUT_LOCK 通道上才会进入仲裁并集。
+            channels.add(CameraChannel.INPUT_LOCK);
+        }
+        if (channels.isEmpty()) {
+            ctx.getSource().sendFailure(Component.literal("perspective: no camera channel given"));
+            return 0;
+        }
+        CameraTarget value = new CameraTarget(position, yaw, pitch, distance, fov, projection, null, locks);
+        final int finalDuration = duration;
+        final int finalPriority = priority;
+        final Enforcement finalEnforcement = enforcement;
         int pushed = 0;
         for (ServerPlayer target : targets) {
             try {
-                CameraDirective directive = pushTopDown(target, COMMAND_DIRECTIVE_ID, DEFAULT_PRIORITY,
-                        Enforcement.SUGGEST, yaw, pitch, DEFAULT_DISTANCE, EnumSet.noneOf(InputLock.class),
-                        duration, false, true);
-                ModularPerspective.LOGGER.info("[perspective] command camera -> {} id={} seq={} duration={}",
-                        target.getGameProfile().getName(), directive.id(), directive.seq(), duration);
+                CameraDirective directive = PerspectiveServer.push(target, COMMAND_DIRECTIVE_ID, finalPriority,
+                        finalEnforcement, channels, value, finalDuration, false, true);
+                ModularPerspective.LOGGER.info("[perspective] command camera -> {} id={} seq={} priority={} enforcement={} "
+                                + "duration={} channels={} locks={}",
+                        target.getGameProfile().getName(), directive.id(), directive.seq(), finalPriority,
+                        finalEnforcement, finalDuration, channels, locks);
                 pushed++;
             } catch (IllegalArgumentException exception) {
                 ctx.getSource().sendFailure(Component.literal("perspective: " + exception.getMessage()));
@@ -164,6 +287,62 @@ public final class PerspectiveCommand {
         int count = pushed;
         ctx.getSource().sendSuccess(() -> Component.literal("Pushed perspective directive to " + count + " player(s)"), false);
         return count;
+    }
+
+    /** 解析 locks 贪婪字符串（空格/逗号分隔；all 展开三位）；非法值返回 null 并 sendFailure。 */
+    private static EnumSet<InputLock> parseLocks(CommandContext<CommandSourceStack> ctx, String raw) {
+        EnumSet<InputLock> locks = EnumSet.noneOf(InputLock.class);
+        for (String token : raw.split("[,\\s]+")) {
+            if (token.isEmpty()) {
+                continue;
+            }
+            switch (token.toLowerCase(Locale.ROOT)) {
+                case "rotate" -> locks.add(InputLock.ROTATE);
+                case "zoom" -> locks.add(InputLock.ZOOM);
+                case "move" -> locks.add(InputLock.MOVE);
+                case "all" -> locks.addAll(EnumSet.allOf(InputLock.class));
+                default -> {
+                    ctx.getSource().sendFailure(Component.literal("perspective: unknown lock bit '" + token + "'"));
+                    return null;
+                }
+            }
+        }
+        return locks;
+    }
+
+    // ------------------------------------------------------------------ preset / hud
+
+    private static LiteralArgumentBuilder<CommandSourceStack> presetMode(String mode, boolean topDown) {
+        LiteralArgumentBuilder<CommandSourceStack> node = Commands.literal(mode)
+                .executes(ctx -> preset(ctx, EntityArgument.getPlayers(ctx, "targets"), topDown, DEFAULT_DURATION));
+        node.then(Commands.literal("duration")
+                .then(Commands.argument("ticks", IntegerArgumentType.integer(1, 24000))
+                        .executes(ctx -> preset(ctx, EntityArgument.getPlayers(ctx, "targets"), topDown,
+                                IntegerArgumentType.getInteger(ctx, "ticks")))));
+        return node;
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> hudMode(String mode, boolean visible) {
+        LiteralArgumentBuilder<CommandSourceStack> node = Commands.literal(mode)
+                .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"), visible, DEFAULT_DURATION));
+        node.then(Commands.literal("duration")
+                .then(Commands.argument("ticks", IntegerArgumentType.integer(1, 24000))
+                        .executes(ctx -> hud(ctx, EntityArgument.getPlayers(ctx, "targets"), visible,
+                                IntegerArgumentType.getInteger(ctx, "ticks")))));
+        return node;
+    }
+
+    /** lock 子命令：{@code ... <bit> on|off}。 */
+    private static LiteralArgumentBuilder<CommandSourceStack> lockChoices(String lockName) {
+        return Commands.literal(lockName)
+                .then(Commands.literal("on")
+                        .executes(ctx -> lock(ctx, EntityArgument.getPlayers(ctx, "targets"), lockName, true)))
+                .then(Commands.literal("off")
+                        .executes(ctx -> lock(ctx, EntityArgument.getPlayers(ctx, "targets"), lockName, false)));
+    }
+
+    private static boolean mayControl(CommandSourceStack source) {
+        return source.hasPermission(Commands.LEVEL_GAMEMASTERS);
     }
 
     private static int preset(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets,
@@ -215,9 +394,7 @@ public final class PerspectiveCommand {
         return PerspectiveServer.push(target, id, priority, enforcement, channels, value, duration, requiresAck, keepOnDeath);
     }
 
-    // ------------------------------------------------------------------ hud
-
-    /** {@code /perspective hud <targets> <on|off> [duration]}：只动 HUD 通道（§10.2 整层跳过验收用）。 */
+    /** {@code /perspective hud <targets> <on|off> [duration <ticks>]}：只动 HUD 通道（§10.2）。 */
     private static int hud(CommandContext<CommandSourceStack> ctx, Collection<ServerPlayer> targets,
                            boolean visible, int duration) {
         int affected = 0;
@@ -244,7 +421,7 @@ public final class PerspectiveCommand {
     // ------------------------------------------------------------------ policy
 
     /** {@code /perspective policy <targets> <flag> on|off}。 */
-    private static com.mojang.brigadier.builder.LiteralArgumentBuilder<CommandSourceStack> policyFlag(String name, int flag) {
+    private static LiteralArgumentBuilder<CommandSourceStack> policyFlag(String name, int flag) {
         return Commands.literal(name)
                 .then(Commands.literal("on")
                         .executes(ctx -> policyFlag(ctx, EntityArgument.getPlayers(ctx, "targets"), flag, true)))

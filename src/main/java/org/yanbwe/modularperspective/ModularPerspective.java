@@ -12,6 +12,7 @@ import org.yanbwe.modularperspective.network.PerspectiveNetwork;
 import org.yanbwe.modularperspective.server.PerspectiveAttachments;
 import org.yanbwe.modularperspective.server.PerspectiveCommand;
 import org.yanbwe.modularperspective.server.PerspectiveServer;
+import org.yanbwe.modularperspective.server.PolicyEventListener;
 
 /**
  * Modular Perspective 主入口（common，单 {@code @Mod}）。
@@ -51,6 +52,9 @@ public final class ModularPerspective {
         NeoForge.EVENT_BUS.addListener(PerspectiveServer::onPlayerLoggedOut);
         NeoForge.EVENT_BUS.addListener(PerspectiveServer::onPlayerRespawn);
         NeoForge.EVENT_BUS.addListener(PerspectiveServer::onPlayerChangedDimension);
+
+        // 示例订阅者：第三方可同样监听策略变更事件（§6.5）。
+        NeoForge.EVENT_BUS.addListener(PolicyEventListener::onPolicyChanged);
 
         LOGGER.info("[{}] common entry loaded (dist={})", MODID, FMLEnvironment.dist);
     }

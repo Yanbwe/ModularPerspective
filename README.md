@@ -1,4 +1,4 @@
-# Modular Perspective（模块化俯视角）
+OK: README camera syntax # Modular Perspective（模块化俯视角）
 
 面向 **NeoForge 1.21.1** 的双端俯视角 / 正交视角框架模组：服务端以"指令"描述镜头（位置、朝向、距离、投影、FOV、输入锁），
 客户端做通道化仲裁后应用；不接管玩家移动逻辑、不做视觉校验。
@@ -34,7 +34,7 @@ PowerShell 下：
 
 ## 命令
 
-`/perspective camera <targets> <yaw> <pitch> [duration]`、`/perspective preset <targets> <top-down|reset> [duration]`、`/perspective lock <targets> <rotate|zoom|move|all> <on|off>`、`/perspective hud <targets> <on|off> [duration]`、`/perspective policy <targets> <allowRequire|allowSuggest|allowOrthographic> <on|off>`、`/perspective policy <targets> maxDirectives <int>`、`/perspective policy <targets> maxDistance <double>`、`/perspective policy <targets> query`、`/perspective clear <targets>`、`/perspective query <targets>`，权限等级 ≥2。
+`/perspective camera <targets> [position <x> <y> <z>] [rotation <yaw> <pitch>] [distance <blocks>] [fov <degrees>] [projection <perspective|orthographic>] [duration <ticks>] [priority <n>] [enforcement <suggest|require>] [locks <rotate|zoom|move|all>...]`（固定顺序、可省略，`locks` 必须最后）、`/perspective preset <targets> <top-down|reset> [duration]`、`/perspective lock <targets> <rotate|zoom|move|all> <on|off>`、`/perspective hud <targets> <on|off> [duration]`、`/perspective policy <targets> <allowRequire|allowSuggest|allowOrthographic> <on|off>`、`/perspective policy <targets> maxDirectives <int>`、`/perspective policy <targets> maxDistance <double>`、`/perspective policy <targets> query`、`/perspective clear <targets>`、`/perspective query <targets>`，权限等级 ≥2。
 服务端栈 + 全量快照下发（登录/重生/换维度补发）+ attachment 持久化（随玩家存档保存、死亡按 `keepOnDeath` 清理）已接线；快照携带 revision/hudVisible/policy 与全量指令，客户端旧 revision 丢弃、只替换服务端来源（本地 F4/F6 预设保留）。上行链路：`CameraArrivedPayload`（到位回执）、`CameraOverriddenPayload`（SUGGEST 锁位被玩家操作顶掉）、`CameraRefusedPayload`（客户端策略禁用），服务端策略变更会发布 `PerspectivePolicyChangedEvent`。`camera`/`preset top-down` 的落位是眼睛沿视线后退 6 格的正交俯视。协议号 2（两端需同时升级）。完整设计语法与 M3 剩余项见 docs §12 / §16。
 
 ## HUD
