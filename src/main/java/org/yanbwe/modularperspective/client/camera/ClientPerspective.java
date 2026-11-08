@@ -61,7 +61,7 @@ public final class ClientPerspective {
      * M1 起默认进世界就开俯视（docs §16 M1 验收：“进游戏即俯视且能看到角色”）。
      * 正式开关由 §13 的配置接管在 M4；现在先写死，方便 POC/验收；F6 仍可切回原版。
      */
-    private static final boolean ENABLED_BY_DEFAULT = true;
+    // 是否默认开启由客户端配置 Config.DEFAULT_PERSPECTIVE 接管（M4，§13.1）。
     /** 每 tick 平滑系数：0 = 不动，1 = 瞬时（M1 先用指数平滑，M2 再按 §5.6 接入 fade/easing）。 */
     private static final float SMOOTHING = 0.35F;
 
@@ -207,7 +207,7 @@ public final class ClientPerspective {
         long tick = minecraft.level.getGameTime();
         if (!initialisedForWorld) {
             initialisedForWorld = true;
-            if (ENABLED_BY_DEFAULT) {
+            if (Config.DEFAULT_PERSPECTIVE.get()) {
                 setTopDown(true);
             }
         }

@@ -5,7 +5,7 @@ OK: README camera syntax # Modular Perspective（模块化俯视角）
 
 - 设计文档：`docs/design.md`（本地文档，**不入 git**；v0.3）
 - 许可证：GPL-3.0
-- 当前状态：M0 骨架 + M1 相机核心 + M2 输入链 + M3 双端链首版（服务端指令栈、全量快照、attachment 持久化、策略/锁/回执上行；客户端仍为通道仲裁 + 帧级插值）+ M4 HUD 平台首版（挂件层 / 注册表 / 调试覆盖层） + M5 剔除首版（section 级近似：沿相机→玩家射线隐藏 section）
+- 当前状态：M0 骨架 + M1 相机核心 + M2 输入链 + M3 双端链首版（服务端指令栈、全量快照、attachment 持久化、策略/锁/回执上行；客户端仍为通道仲裁 + 帧级插值）+ M4 HUD 平台（挂件层 / 注册表 / 调试覆盖层 / 可拖拽与世界锚定示例控件） + M5 剔除首版（section 级近似：沿相机→玩家射线隐藏 section）
 
 ## 环境
 
@@ -48,7 +48,7 @@ HudRegistry.register(ResourceLocation.fromNamespaceAndPath("examplemod", "quest_
         ctx -> new QuestPanelWidget());
 ```
 
-控件实现 `HudWidget`（锚点/偏移/尺寸/层级/是否穿透）；`clickThrough=false` 的控件会消费点击与滚轮，不触发原版攻击/挖掘；指针移出矩形后仍保持 capture 直到抬起（§10.3）。
+控件实现 `HudWidget`（锚点/偏移/尺寸/层级/是否穿透）；`clickThrough=false` 的控件会消费点击与滚轮，不触发原版攻击/挖掘；指针移出矩形后仍保持 capture 直到抬起（§10.3）。M4 收尾新增：`draggable()` 让宿主转发拖拽（按下/位移/松开回调），`worldAnchor(HudContext)` 让控件跟随世界坐标（仅正交俯视时投影成 GUI 坐标）；内置两个示例控件（可拖拽徽标、头顶世界锚定标记），配置项 `hudExamples` 可关闭，`defaultTopDown` 控制进世界是否默认俯视。
 
 
 
@@ -68,7 +68,7 @@ src/main/java/org/yanbwe/modularperspective/
   client/input/                    伪解锁光标状态机（CursorController）
   client/cull/                     剔除：BlockCuller（方块级）/ SectionCuller（section 级）/ RoomScanner（室内外）/ CullingGhostRenderer（线框+半透明填充）
   api/hud/                         公开 HUD 类型（Anchor/HudWidget/HudContext/HudLayout/HudRegistry）
-  client/hud/                      HUD 宿主与内置控件（ClientHud/CameraStatusWidget/DebugHudWidget）
+  client/hud/                      HUD 宿主与内置控件（ClientHud/CameraStatusWidget/DebugHudWidget/ExampleBadgeWidget/WorldAnchorWidget）
   client/PerspectiveClientNetwork  客户端 payload 接收（快照 → CameraStack）
   network/                         payload 定义与编解码（Snapshot / Arrived / Overridden / Refused / PerspectiveNetwork）
   server/PerspectiveCommand.java   /perspective 命令（camera / preset / lock / hud / policy / clear / query）

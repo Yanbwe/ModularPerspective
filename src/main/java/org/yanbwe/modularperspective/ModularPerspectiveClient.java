@@ -35,6 +35,8 @@ import org.yanbwe.modularperspective.client.cull.SightlineScanner;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
 import org.yanbwe.modularperspective.client.hud.DebugHudWidget;
+import org.yanbwe.modularperspective.client.hud.ExampleBadgeWidget;
+import org.yanbwe.modularperspective.client.hud.WorldAnchorWidget;
 import org.yanbwe.modularperspective.client.input.CursorController;
 import net.minecraft.world.level.block.Blocks;
 
@@ -113,6 +115,11 @@ public final class ModularPerspectiveClient {
                 context -> new CameraStatusWidget());
         HudRegistry.register(ResourceLocation.fromNamespaceAndPath(ModularPerspective.MODID, "debug_overlay"),
                 context -> new DebugHudWidget());
+        // M4 收尾：第三方控件示例（可拖拽徽标 + 世界锚定标记，配置项 hudExamples 可整体关闭）。
+        HudRegistry.register(ResourceLocation.fromNamespaceAndPath(ModularPerspective.MODID, "example_badge"),
+                context -> new ExampleBadgeWidget());
+        HudRegistry.register(ResourceLocation.fromNamespaceAndPath(ModularPerspective.MODID, "world_anchor"),
+                context -> new WorldAnchorWidget());
 
         // game bus：tick 消费按键 + 相机状态推进；FOV 通道走 ViewportEvent（§8.2，不 mixin getFov）。
         NeoForge.EVENT_BUS.addListener(ModularPerspectiveClient::onClientTick);
@@ -458,8 +465,10 @@ public final class ModularPerspectiveClient {
             case 1 -> {
                 if (autoTicks - autoPhaseTick >= 20) {
                     grabScreenshot(minecraft, "m4-hud.png");
-                    ModularPerspective.LOGGER.info("[auto] M4 phase1b: hud screenshot; status={}",
-                            ClientHud.debugStatus());
+                    ModularPerspective.LOGGER.info("[auto] M4 phase1b: hud screenshot; status={} projection={}",
+                            ClientHud.debugStatus(), ClientHud.debugProjectionState());
+                    // M4 收尾：拖拽示例控件（徽标中心 (60,34) 拖到 (260,96)），验证 draggable 路由。
+                    ClientHud.debugDrag(60, 34, 260, 96);
                     autoPhase = 2;
                     autoPhaseTick = autoTicks;
                 }
@@ -515,7 +524,7 @@ public final class ModularPerspectiveClient {
             }
             case 7 -> {
                 if (autoTicks - autoPhaseTick >= 10) {
-                    runServerCommand(minecraft, "perspective hud @s off 100");
+                    runServerCommand(minecraft, "perspective hud @s off duration 100");
                     autoPhase = 8;
                     autoPhaseTick = autoTicks;
                     ModularPerspective.LOGGER.info("[auto] M4 phase7: hud-off command sent");

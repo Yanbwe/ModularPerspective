@@ -79,11 +79,21 @@ public final class Config {
     public static final ModConfigSpec.EnumValue<ServerControl> SERVER_CONTROL;
     public static final ModConfigSpec.BooleanValue ORTHO_SKY;
     public static final ModConfigSpec.BooleanValue ZOOM_SCROLL_ENABLED;
+    public static final ModConfigSpec.BooleanValue DEFAULT_PERSPECTIVE;
+    public static final ModConfigSpec.BooleanValue HUD_EXAMPLES;
 
     static {
         SERVER_CONTROL = CLIENT_BUILDER
                 .comment("玩家是否允许被服务端控制视角：ALLOW=允许，SUGGEST_ONLY=只接受建议，DISABLED=只保留本地控制（玩家权利，服务端不能覆盖）")
                 .defineEnum("serverControl", ServerControl.ALLOW);
+
+        DEFAULT_PERSPECTIVE = CLIENT_BUILDER
+                .comment("进入世界时是否默认开启正交俯视（§13.1；关闭后仍可按 F4/F6 手动切换）")
+                .define("defaultTopDown", true);
+
+        HUD_EXAMPLES = CLIENT_BUILDER
+                .comment("是否显示内置的第三方 HUD 示例控件（可拖拽徽标 + 世界锚定标记），§10.2/§10.4")
+                .define("hudExamples", true);
 
         ORTHO_SKY = CLIENT_BUILDER
                 .comment("正交投影下是否绘制原版天空/云/星星（实验项，§8.2）")
