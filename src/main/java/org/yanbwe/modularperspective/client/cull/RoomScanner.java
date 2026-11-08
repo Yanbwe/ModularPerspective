@@ -13,6 +13,7 @@ import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 
+import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
@@ -595,6 +596,26 @@ public final class RoomScanner {
                 "[room] published columns={} roof={} wall={} openSky={} doors={} took={}us capture={}us visits={}",
                 result.columns.size(), result.roofColumns, result.wallColumns, result.openSky, result.doorways,
                 elapsed / 1000L, result.captureNanos / 1000L, result.visits);
+        markDirtyAroundPlayer();
+    }
+
+    /** 房间/屋顶快照变化后，把玩家周围 3x3x3 个 section 标脏，邻居方块的面按新剔除状态重建（m07629）。 */
+    private void markDirtyAroundPlayer() {
+        Minecraft minecraft = Minecraft.getInstance();
+        if (minecraft.player == null || minecraft.levelRenderer == null) {
+            return;
+        }
+        BlockPos center = minecraft.player.blockPosition();
+        int sectionX = SectionPos.blockToSectionCoord(center.getX());
+        int sectionY = SectionPos.blockToSectionCoord(center.getY());
+        int sectionZ = SectionPos.blockToSectionCoord(center.getZ());
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dz = -1; dz <= 1; dz++) {
+                    minecraft.levelRenderer.setSectionDirty(sectionX + dx, sectionY + dy, sectionZ + dz);
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ worker thread

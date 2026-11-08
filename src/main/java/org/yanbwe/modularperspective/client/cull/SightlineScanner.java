@@ -58,7 +58,7 @@ public final class SightlineScanner {
     private static final int MAX_CULLED_BLOCKS = 8192;
     private static final int MAX_PROTECTED_BLOCKS = 8192;
     private static final int MAX_HIT_BLOCKS = 1024;
-    private static final int MAX_DIRTY_PER_TICK = 16;
+    private static final int MAX_DIRTY_PER_TICK = 32;
     private static final long RESCAN_INTERVAL_TICKS = 4L;
     private static final double RESCAN_CAMERA_MOVE_SQ = 0.04D;
     private static final double RESCAN_PLAYER_MOVE_SQ = 0.25D;
@@ -462,12 +462,12 @@ public final class SightlineScanner {
             int shapes, int incomplete) {
         for (long block : culled) {
             if (!nextCulled.contains(block)) {
-                dirtySections.add(sectionKey(block));
+                markDirtyAround(block);
             }
         }
         for (long block : nextCulled) {
             if (!culled.contains(block)) {
-                dirtySections.add(sectionKey(block));
+                markDirtyAround(block);
             }
         }
         culled.clear();
@@ -484,6 +484,14 @@ public final class SightlineScanner {
     private static long sectionKey(long blockLong) {
         BlockPos pos = BlockPos.of(blockLong);
         return SectionPos.asLong(pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4);
+    }
+
+    private void markDirtyAround(long blockLong) {
+        dirtySections.add(sectionKey(blockLong));
+        BlockPos pos = BlockPos.of(blockLong);
+        for (Direction direction : Direction.values()) {
+            dirtySections.add(sectionKey(pos.relative(direction).asLong()));
+        }
     }
 
     private void flushDirty(Level level) {

@@ -20,6 +20,7 @@ import org.yanbwe.modularperspective.ModularPerspective;
 import org.yanbwe.modularperspective.api.camera.InputLock;
 import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
+import org.yanbwe.modularperspective.client.cull.CullingFaceFilter;
 import org.yanbwe.modularperspective.mixin.MinecraftAccessor;
 import org.yanbwe.modularperspective.mixin.MouseHandlerAccessor;
 
@@ -181,6 +182,14 @@ public final class CursorController {
 
         BlockHitResult hit = minecraft.level.clip(
                 new ClipContext(from, to, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, minecraft.player));
+        // 半透明幽灵方块不参与选择：继续沿射线找它后面第一个仍然可见的方块。
+        int guard = 0;
+        while (hit.getType() == HitResult.Type.BLOCK
+                && CullingFaceFilter.isCulled(hit.getBlockPos()) && guard++ < 32) {
+            Vec3 resume = hit.getLocation().add(forward.x() * 0.05D, forward.y() * 0.05D, forward.z() * 0.05D);
+            hit = minecraft.level.clip(
+                    new ClipContext(resume, to, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, minecraft.player));
+        }
         minecraft.hitResult = hit;
         minecraft.crosshairPickEntity = null;
         if (hit.getType() == HitResult.Type.MISS) {

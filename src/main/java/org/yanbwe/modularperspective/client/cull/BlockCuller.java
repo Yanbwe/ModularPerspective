@@ -7,6 +7,7 @@ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.util.Mth;
@@ -46,7 +47,7 @@ public final class BlockCuller {
     /** 最多同时剔除多少方块，防止实心世界里整屏挖空。 */
     private static final int MAX_CULLED_BLOCKS = 8192;
     /** 每次重算最多把多少个 section 标脏，避免一帧触发大量重建。 */
-    private static final int MAX_DIRTY_PER_TICK = 16;
+    private static final int MAX_DIRTY_PER_TICK = 32;
     /** v0.3 SHAPE tier 首片：每轮最多剔除多少方块（防止新 tier 把整屏挖空）。 */
     private static final int MAX_CONE_BLOCKS = 4096;
 
@@ -225,8 +226,7 @@ public final class BlockCuller {
             if (SightlineScanner.get().isProtected(center)) {
                 continue;
             }
-            BlockState state = level.getBlockState(center);
-            if (!state.isSolidRender(level, center)) {
+            if (!CullingOccluders.isOccluder(level, center)) {
                 continue;
             }
             if (!floodCarveShape(level, center, minY, playerSection, visited, RoomScanner.get().isIndoor())) {
@@ -257,6 +257,7 @@ public final class BlockCuller {
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
         int visitedCap = shellOnly ? MAX_SHAPE_BLOCKS * 2 : Integer.MAX_VALUE;
         int visitedCount = 0;
+        OccluderClass startClass = OccluderClass.classify(level.getBlockState(start));
         while (!queue.isEmpty()) {
             BlockPos pos = queue.poll();
             if (++visitedCount > visitedCap) {
@@ -293,7 +294,8 @@ public final class BlockCuller {
                         continue;
                     }
                     BlockState state = level.getBlockState(neighbor);
-                    if (!state.isSolidRender(level, neighbor)) {
+                    if (!CullingOccluders.isOccluder(level, neighbor)
+                            || OccluderClass.classify(state) != startClass) {
                         continue;
                     }
                     boolean include = !shellOnly || RoomScanner.get().isShell(neighbor);
@@ -329,8 +331,7 @@ public final class BlockCuller {
                     if (SightlineScanner.get().isProtected(pos)) {
                         continue;
                     }
-                    BlockState state = level.getBlockState(pos);
-                    if (!state.isSolidRender(level, pos)) {
+                    if (!CullingOccluders.isOccluder(level, pos)) {
                         continue;
                     }
                     NEXT_CULLED.add(key);
@@ -407,18 +408,25 @@ public final class BlockCuller {
         for (LongIterator it = CULLED.iterator(); it.hasNext(); ) {
             long block = it.nextLong();
             if (!NEXT_CULLED.contains(block)) {
-                DIRTY_SECTIONS.add(SectionPos.asLong(BlockPos.of(block)));
+                markDirty(BlockPos.of(block));
             }
         }
         for (LongIterator it = NEXT_CULLED.iterator(); it.hasNext(); ) {
             long block = it.nextLong();
             if (!CULLED.contains(block)) {
-                DIRTY_SECTIONS.add(SectionPos.asLong(BlockPos.of(block)));
+                markDirty(BlockPos.of(block));
             }
         }
     }
 
     /** 按预算把待重建 section 标脏（客户端主线程；vanilla 会在之后异步重算 mesh）。 */
+    private static void markDirty(BlockPos pos) {
+        DIRTY_SECTIONS.add(SectionPos.asLong(pos));
+        for (Direction direction : Direction.values()) {
+            DIRTY_SECTIONS.add(SectionPos.asLong(pos.relative(direction)));
+        }
+    }
+
     private static void flushDirty(Level level) {
         if (DIRTY_SECTIONS.isEmpty()) {
             dirtyPending = 0;

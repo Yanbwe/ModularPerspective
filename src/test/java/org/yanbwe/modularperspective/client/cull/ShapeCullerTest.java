@@ -37,8 +37,9 @@ class ShapeCullerTest {
     }
 
     @Test
-    void blockCloseToCameraIsAlwaysCulled() {
-        assertTrue(cull(0.0D, 65.5D, -5.5D, RADIUS, CONE));
+    void blockVeryCloseToCameraIsNotCulled() {
+        // m07629：相机附近整片剔除很难看；离相机不足 MIN_PROJECTION 的方块不再剔。
+        assertFalse(cull(0.0D, 65.5D, -5.5D, RADIUS, CONE));
     }
 
     @Test

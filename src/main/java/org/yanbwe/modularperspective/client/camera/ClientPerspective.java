@@ -10,6 +10,8 @@ import net.minecraft.client.CameraType;
 import net.minecraft.client.Minecraft;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 import net.neoforged.neoforge.client.event.ViewportEvent;
 import org.jetbrains.annotations.Nullable;
@@ -86,6 +88,10 @@ public final class ClientPerspective {
     private static CameraType savedCameraType = CameraType.FIRST_PERSON;
     /** 每次进入世界只应用一次默认开关（退出世界 {@link #reset()} 时清掉）。 */
     private static boolean initialisedForWorld;
+    /** 俯视自由光标时让角色头看向鼠标（m07629）；保存进入前视角用于退出恢复。 */
+    private static boolean headLookSaved;
+    private static float savedHeadXRot;
+    private static float savedHeadYRot;
     /** 当前快照里“服务端来源”的指令 id（快照全量替换时只移除本集合，本地预设保留，§7.3）。 */
     private static final Set<String> serverDirectiveIds = new HashSet<>();
     /** 已应用的快照 revision（丢弃更旧的包；相等视为强制重发，§7.3）。 */
@@ -110,6 +116,11 @@ public final class ClientPerspective {
             return;
         }
         topDown = enabled;
+        if (enabled) {
+            saveHeadLook();
+        } else {
+            restoreHeadLook();
+        }
         yawOffset = 0.0F;
         pitchOffset = 0.0F;
         presetDistance = DEFAULT_TOP_DOWN_DISTANCE;
@@ -227,6 +238,51 @@ public final class ClientPerspective {
             minecraft.options.setCameraType(CameraType.THIRD_PERSON_BACK);
         }
         sendArrivalsIfNeeded();
+        updateHeadLook(minecraft);
+    }
+
+    private static void saveHeadLook() {
+        if (headLookSaved || Minecraft.getInstance().player == null) {
+            return;
+        }
+        savedHeadXRot = Minecraft.getInstance().player.getXRot();
+        savedHeadYRot = Minecraft.getInstance().player.getYRot();
+        headLookSaved = true;
+    }
+
+    private static void restoreHeadLook() {
+        if (!headLookSaved) {
+            return;
+        }
+        headLookSaved = false;
+        if (Minecraft.getInstance().player != null) {
+            Minecraft.getInstance().player.setXRot(savedHeadXRot);
+            Minecraft.getInstance().player.setYRot(savedHeadYRot);
+            Minecraft.getInstance().player.setYHeadRot(savedHeadYRot);
+        }
+    }
+
+    /** 俯视自由光标时，让本地玩家头部（第三人称模型的头）朝向鼠标指到的方块。 */
+    private static void updateHeadLook(Minecraft minecraft) {
+        if (!topDown || minecraft.player == null || !CursorController.isPseudoUnlocked()) {
+            return;
+        }
+        if (!(minecraft.hitResult instanceof BlockHitResult blockHit) || blockHit.getType() != HitResult.Type.BLOCK) {
+            return;
+        }
+        Vec3 eye = minecraft.player.getEyePosition(1.0F);
+        Vec3 target = blockHit.getLocation();
+        double dx = target.x - eye.x;
+        double dy = target.y - eye.y;
+        double dz = target.z - eye.z;
+        double horizontal = Math.sqrt(dx * dx + dz * dz);
+        if (horizontal < 1.0E-4D && Math.abs(dy) < 1.0E-4D) {
+            return;
+        }
+        float targetYaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float targetPitch = (float) -Math.toDegrees(Math.atan2(dy, horizontal));
+        minecraft.player.setYHeadRot(Mth.approach(minecraft.player.getYHeadRot(), targetYaw, 30.0F));
+        minecraft.player.setXRot(Mth.approach(minecraft.player.getXRot(), targetPitch, 12.0F));
     }
 
     /** 当前生效输出（渲染期唯一来源；null = 完全原版）。 */
@@ -422,6 +478,7 @@ public final class ClientPerspective {
         pitchOffset = 0.0F;
         presetDistance = DEFAULT_TOP_DOWN_DISTANCE;
         restoreCameraType();
+        restoreHeadLook();
     }
 
     // ------------------------------------------------------------------ 渲染接线

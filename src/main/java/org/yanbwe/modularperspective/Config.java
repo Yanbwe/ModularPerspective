@@ -53,10 +53,10 @@ public final class Config {
                 .define("shape", true);
         CULLING_SHAPE_RADIUS = COMMON_BUILDER
                 .comment("形状剔除圆柱半径（格，对应旧模组 cullAngle 默认 6.0）")
-                .defineInRange("shapeRadius", 6.0D, 0.0D, 32.0D);
+                .defineInRange("shapeRadius", 2.5D, 0.0D, 32.0D);
         CULLING_SHAPE_CONE_HALF_ANGLE = COMMON_BUILDER
                 .comment("近玩家处锥形半角（度，对应旧模组 coneHalfAngle 默认 45）")
-                .defineInRange("shapeConeHalfAngle", 45.0D, 0.0D, 89.0D);
+                .defineInRange("shapeConeHalfAngle", 30.0D, 0.0D, 89.0D);
         CULLING_SIGHTLINE_ENABLED = COMMON_BUILDER
                 .comment("v0.3 视线/轮廓剔除（旧模组 SightlineScanner）：按相机→玩家 27 条射线命中的连通形状整块判定，挡住视线多数的形状整体剔除、挡得少的整块保护，避免把家具/柱子挖出洞")
                 .define("sightline", true);

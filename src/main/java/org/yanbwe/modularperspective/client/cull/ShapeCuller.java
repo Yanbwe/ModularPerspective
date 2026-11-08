@@ -14,7 +14,7 @@ package org.yanbwe.modularperspective.client.cull;
  */
 public final class ShapeCuller {
     /** 相机周围“无条件剔除”的半径（格），对应旧模组 GenericCuller3 的 5 格。 */
-    public static final double CAMERA_ALWAYS_RADIUS = 5.0D;
+    public static final double MIN_PROJECTION = 1.5D;
 
     private ShapeCuller() {}
 
@@ -48,18 +48,14 @@ public final class ShapeCuller {
         if (axisLenSq < 1.0E-6D) {
             return false;
         }
-        double toCameraX = blockX - cameraX;
-        double toCameraY = blockY - cameraY;
-        double toCameraZ = blockZ - cameraZ;
-        double cameraDistSq = toCameraX * toCameraX + toCameraY * toCameraY + toCameraZ * toCameraZ;
-        if (cameraDistSq < CAMERA_ALWAYS_RADIUS * CAMERA_ALWAYS_RADIUS) {
-            return true;
-        }
         double relX = blockX - feetX;
         double relY = blockY - feetY;
         double relZ = blockZ - feetZ;
         double projection = (relX * axisX + relY * axisY + relZ * axisZ) / Math.sqrt(axisLenSq);
         if (projection <= 0.0D) {
+            return false;
+        }
+        if (projection > Math.sqrt(axisLenSq) - MIN_PROJECTION) {
             return false;
         }
         double crossX = relY * axisZ - relZ * axisY;
