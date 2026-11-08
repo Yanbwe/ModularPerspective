@@ -193,7 +193,8 @@ public final class SightlineScanner {
 
     public void tick(Minecraft minecraft) {
         Level level = minecraft.level;
-        boolean enabled = Config.CULLING_ENABLED.get() && Config.CULLING_SIGHTLINE_ENABLED.get();
+        boolean enabled = Config.CULLING_ENABLED.get() && Config.CULLING_SIGHTLINE_ENABLED.get()
+                && !Config.CULLING_VOLUME.get();
         if (!enabled || level == null || minecraft.player == null || !ClientPerspective.isTopDown()) {
             if (active || !culled.isEmpty() || !protectedBlocks.isEmpty()) {
                 reset();

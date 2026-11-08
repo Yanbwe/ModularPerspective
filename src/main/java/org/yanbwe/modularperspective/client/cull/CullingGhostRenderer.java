@@ -13,7 +13,6 @@ import net.minecraft.client.renderer.texture.OverlayTexture;
 import net.minecraft.client.resources.model.BakedModel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.util.Mth;
 import net.minecraft.util.RandomSource;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
@@ -25,28 +24,25 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * “幽灵方块”（m07629 重做）：被剔除的方块以方块模型贴图的半透明体积显示，
- * 让玩家知道这里不是区块没渲染。
+ * “幽灵方块”（v0.4，2026-11-08 实机反馈 R1）：被剔除的方块以方块贴图的半透明体积显示。
  *
- * <p>视觉规则（用户现场反馈）：
+ * <p>视觉规则：
  * <ul>
- *   <li>不再画蓝色线框（很丑，删除）；</li>
- *   <li>透明度随“离玩家（屏幕中心）的水平距离”变化：近 1.5 格完全透明，
- *       远到 12 格时最不透明（0.45），中间线性渐变；</li>
- *   <li>相邻方块也在幽灵集合里时跳过该方向的面，避免体积内部发黑/重叠。</li>
+ *   <li>不画线框/边框；</li>
+ *   <li>不透明度按“方块到相机-角色连线（{@link VolumeCuller} 的轴）的垂直距离”计算：
+ *       3 格以内完全透明、随后快速上升，8 格外达到上限；连线首尾用平滑包络收口；</li>
+ *   <li>只画朝向空气/透明邻居的面：邻居也是幽灵或被遮挡判定为实心时跳过，避免内部面重叠；</li>
+ *   <li>房间剔除块（屋顶 span）按到角色的距离给一个稳定的低透明度，避免整片屋顶直接消失。</li>
  * </ul>
- *
- * <p>纯客户端、只读 {@link BlockCuller} / {@link RoomScanner} / {@link SightlineScanner} 状态。
  */
 public final class CullingGhostRenderer {
     private static final double MAX_RENDER_DISTANCE = 64.0D;
     private static final int MAX_BOXES = 4096;
-    private static final double NEAR_DISTANCE = 1.5D;
-    private static final double FAR_DISTANCE = 12.0D;
     private static final float MIN_ALPHA = 0.02F;
-    private static final float MAX_FILL_ALPHA = 0.45F;
-    private static final float TINT_RED = 0.75F;
-    private static final float TINT_GREEN = 0.9F;
+    private static final float ROOM_ALPHA = 0.30F;
+    private static final double ROOM_FADE_DISTANCE = 40.0D;
+    private static final float TINT_RED = 0.80F;
+    private static final float TINT_GREEN = 0.92F;
     private static final float TINT_BLUE = 1.0F;
     private static final Direction[] DIRECTIONS = Direction.values();
 
@@ -65,44 +61,58 @@ public final class CullingGhostRenderer {
         if (level == null || minecraft.player == null) {
             return;
         }
-        boolean blockCulling = BlockCuller.isCulling() && !BlockCuller.culledBlocks().isEmpty();
+        boolean volumeCulling = VolumeCuller.get().isActive();
         boolean roomCulling = RoomScanner.get().isIndoor();
-        boolean sightlineCulling = SightlineScanner.get().isCulling() && SightlineScanner.get().culledCount() > 0;
-        if (!blockCulling && !roomCulling && !sightlineCulling) {
+        boolean legacyCulling = (BlockCuller.isCulling() && !BlockCuller.culledBlocks().isEmpty())
+                || (SightlineScanner.get().isCulling() && SightlineScanner.get().culledCount() > 0);
+        if (!volumeCulling && !roomCulling && !legacyCulling) {
             return;
         }
 
         Vec3 camera = event.getCamera().getPosition();
-        Vec3 player = minecraft.player.position();
+        Vec3 axisStart = VolumeCuller.get().cameraPos();
+        Vec3 axisEnd = VolumeCuller.get().targetPos();
+        if (axisStart.equals(Vec3.ZERO) || axisEnd.equals(Vec3.ZERO)) {
+            axisStart = camera;
+            axisEnd = minecraft.player.getEyePosition(1.0F);
+        }
         double maxDistanceSq = MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE;
+        double inner = Config.CULLING_VOLUME_INNER_RADIUS.get();
+        double outer = Config.CULLING_VOLUME_OUTER_RADIUS.get();
+        double maxAlpha = Config.CULLING_VOLUME_MAX_ALPHA.get();
+        Vec3 player = minecraft.player.position();
 
         List<BlockPos> boxes = new ArrayList<>();
-        if (blockCulling) {
-            LongIterator iterator = BlockCuller.culledBlocks().iterator();
-            while (iterator.hasNext() && boxes.size() < MAX_BOXES) {
-                BlockPos pos = BlockPos.of(iterator.nextLong());
-                if (inRange(pos, camera, maxDistanceSq)) {
+        if (volumeCulling) {
+            VolumeCuller.get().forEachCulledBlock(pos -> {
+                if (boxes.size() < MAX_BOXES && inRange(pos, camera, maxDistanceSq)) {
                     boxes.add(pos.immutable());
                 }
-            }
-        }
-        if (sightlineCulling && boxes.size() < MAX_BOXES) {
-            SightlineScanner.get().forEachCulledBlock(pos -> {
-                if (boxes.size() >= MAX_BOXES || !inRange(pos, camera, maxDistanceSq)) {
-                    return;
-                }
-                boxes.add(pos.immutable());
             });
+        }
+        if (legacyCulling && boxes.size() < MAX_BOXES) {
+            if (BlockCuller.isCulling()) {
+                LongIterator iterator = BlockCuller.culledBlocks().iterator();
+                while (iterator.hasNext() && boxes.size() < MAX_BOXES) {
+                    BlockPos pos = BlockPos.of(iterator.nextLong());
+                    if (inRange(pos, camera, maxDistanceSq)) {
+                        boxes.add(pos);
+                    }
+                }
+            }
+            if (boxes.size() < MAX_BOXES) {
+                SightlineScanner.get().forEachCulledBlock(pos -> {
+                    if (boxes.size() < MAX_BOXES && inRange(pos, camera, maxDistanceSq)) {
+                        boxes.add(pos.immutable());
+                    }
+                });
+            }
         }
         if (roomCulling && boxes.size() < MAX_BOXES) {
             RoomScanner.get().forEachCulledBlock(pos -> {
-                if (boxes.size() >= MAX_BOXES || !inRange(pos, camera, maxDistanceSq)) {
-                    return;
+                if (boxes.size() < MAX_BOXES && inRange(pos, camera, maxDistanceSq)) {
+                    boxes.add(new BlockPos(pos.getX(), pos.getY(), pos.getZ()));
                 }
-                if (blockCulling && BlockCuller.isCulled(pos)) {
-                    return;
-                }
-                boxes.add(new BlockPos(pos.getX(), pos.getY(), pos.getZ()));
             });
         }
         if (boxes.isEmpty()) {
@@ -119,14 +129,27 @@ public final class CullingGhostRenderer {
         RandomSource random = RandomSource.create(42L);
         VertexConsumer textured = buffers.getBuffer(RenderType.translucent());
         BlockPos.MutableBlockPos neighbour = new BlockPos.MutableBlockPos();
+        double[] tBuffer = new double[1];
         for (BlockPos pos : boxes) {
             BlockState state = level.getBlockState(pos);
             if (state.isAir()) {
                 continue;
             }
-            double dx = pos.getX() + 0.5D - player.x;
-            double dz = pos.getZ() + 0.5D - player.z;
-            float alpha = alphaFor(Math.sqrt(dx * dx + dz * dz));
+            double cx = pos.getX() + 0.5D;
+            double cy = pos.getY() + 0.5D;
+            double cz = pos.getZ() + 0.5D;
+            float alpha;
+            if (volumeCulling && VolumeCuller.get().isCulled(pos)) {
+                double distance = SightlineVolume.perpendicularDistance(
+                        cx, cy, cz, axisStart.x, axisStart.y, axisStart.z,
+                        axisEnd.x, axisEnd.y, axisEnd.z, tBuffer);
+                alpha = (float) SightlineVolume.alpha(distance, tBuffer[0], inner, outer, maxAlpha);
+            } else {
+                double dx = cx - player.x;
+                double dz = cz - player.z;
+                double horizontal = Math.sqrt(dx * dx + dz * dz);
+                alpha = (float) (ROOM_ALPHA * Math.max(0.0D, 1.0D - horizontal / ROOM_FADE_DISTANCE));
+            }
             if (alpha < MIN_ALPHA) {
                 continue;
             }
@@ -134,11 +157,13 @@ public final class CullingGhostRenderer {
             poseStack.pushPose();
             poseStack.translate(pos.getX() - camera.x, pos.getY() - camera.y, pos.getZ() - camera.z);
             PoseStack.Pose pose = poseStack.last();
-            // 被剔除方块的世界光照已失效（方块被当作空气），按蓝图风格全亮绘制。
             int light = LightTexture.FULL_BRIGHT;
             for (Direction direction : DIRECTIONS) {
                 neighbour.setWithOffset(pos, direction);
                 if (boxSet.contains(neighbour.asLong())) {
+                    continue;
+                }
+                if (CullingOccluders.isOccluder(level, neighbour)) {
                     continue;
                 }
                 for (var quad : model.getQuads(state, direction, random)) {
@@ -153,14 +178,6 @@ public final class CullingGhostRenderer {
             poseStack.popPose();
         }
         buffers.endBatch(RenderType.translucent());
-    }
-
-    private static float alphaFor(double distance) {
-        if (distance <= NEAR_DISTANCE) {
-            return 0.0F;
-        }
-        double t = Mth.clamp((distance - NEAR_DISTANCE) / (FAR_DISTANCE - NEAR_DISTANCE), 0.0D, 1.0D);
-        return (float) (t * MAX_FILL_ALPHA);
     }
 
     private static boolean inRange(BlockPos pos, Vec3 camera, double maxDistanceSq) {

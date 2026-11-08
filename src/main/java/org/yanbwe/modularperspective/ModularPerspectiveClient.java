@@ -32,6 +32,7 @@ import org.yanbwe.modularperspective.client.cull.CullingGhostRenderer;
 import org.yanbwe.modularperspective.client.cull.RoomScanner;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
 import org.yanbwe.modularperspective.client.cull.SightlineScanner;
+import org.yanbwe.modularperspective.client.cull.VolumeCuller;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
 import org.yanbwe.modularperspective.client.hud.DebugHudWidget;
@@ -159,6 +160,7 @@ public final class ModularPerspectiveClient {
             ClientPerspective.reset();
             CursorController.reset();
             SightlineScanner.get().reset();
+            VolumeCuller.get().reset();
             autoTicks = 0;
             return;
         }
@@ -176,6 +178,7 @@ public final class ModularPerspectiveClient {
         CursorController.tick(minecraft);
         RoomScanner.get().tick(minecraft);
         SightlineScanner.get().tick(minecraft);
+        VolumeCuller.tick(minecraft);
         SectionCuller.tick(minecraft);
         BlockCuller.tick(minecraft);
         runAutoVerification(minecraft);

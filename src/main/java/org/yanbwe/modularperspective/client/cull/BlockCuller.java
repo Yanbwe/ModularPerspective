@@ -111,7 +111,8 @@ public final class BlockCuller {
         boolean master = Config.CULLING_ENABLED.get();
         boolean rayEnabled = master && Config.CULLING_BLOCK_LEVEL.get();
         boolean shapeEnabled = master && Config.CULLING_SHAPE_ENABLED.get() && !RoomScanner.get().isIndoor();
-        if ((!rayEnabled && !shapeEnabled) || level == null || minecraft.player == null
+        boolean volumeEnabled = master && Config.CULLING_VOLUME.get();
+        if (volumeEnabled || (!rayEnabled && !shapeEnabled) || level == null || minecraft.player == null
                 || !ClientPerspective.isTopDown()) {
             disable(level);
             return;

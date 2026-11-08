@@ -8,6 +8,9 @@ public final class CullingFaceFilter {
     }
 
     public static boolean isCulled(BlockPos pos) {
+        if (VolumeCuller.get().isCulled(pos)) {
+            return true;
+        }
         if (BlockCuller.isCulled(pos)) {
             return true;
         }

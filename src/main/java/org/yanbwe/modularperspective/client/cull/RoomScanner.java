@@ -733,7 +733,8 @@ public final class RoomScanner {
         if (Config.DEBUG_OVERLAY.get()) {
             ModularPerspective.LOGGER.info("[room] roof solve columns={} openSky={}", columnList.size(), openSky);
         }
-        if (openSky > columnList.size() * OPEN_SKY_BAIL_RATIO) {
+        // 保守化（2026-11-08 实机反馈）：只要有任意一列看到天空，就不判定为室内，避免树冠/局部遮挡误判。
+        if (openSky > 0) {
             return ScanResult.bail(request.epoch, "player is under open sky (" + openSky + "/" + columnList.size()
                     + " columns) - not in a room", 0, false, System.nanoTime() - start, request.captureNanos);
         }

@@ -31,6 +31,11 @@ public final class Config {
     public static final ModConfigSpec.DoubleValue CULLING_SHAPE_CONE_HALF_ANGLE;
     public static final ModConfigSpec.BooleanValue CULLING_SIGHTLINE_ENABLED;
     public static final ModConfigSpec.DoubleValue CULLING_SIGHTLINE_OCCLUDE_THRESHOLD;
+    public static final ModConfigSpec.BooleanValue CULLING_VOLUME;
+    public static final ModConfigSpec.DoubleValue CULLING_VOLUME_INNER_RADIUS;
+    public static final ModConfigSpec.DoubleValue CULLING_VOLUME_OUTER_RADIUS;
+    public static final ModConfigSpec.DoubleValue CULLING_VOLUME_MAX_ALPHA;
+    public static final ModConfigSpec.DoubleValue CULLING_ROOM_MAX_DISTANCE;
     public static final ModConfigSpec.BooleanValue DEBUG_OVERLAY;
 
     static {
@@ -41,7 +46,7 @@ public final class Config {
                 .define("sectionApproximation", true);
         CULLING_BLOCK_LEVEL = COMMON_BUILDER
                 .comment("v0.2 方块级剔除：把相机-玩家视线上的实心方块从区块 mesh 中剔除（只影响渲染，不改世界）；开启时 section 级近似自动让位")
-                .define("blockLevel", true);
+                .define("blockLevel", false);
         CULLING_GHOST = COMMON_BUILDER
                 .comment("v0.2 方块级剔除时给被剔除方块画半透明线框（幽灵轮廓），避免“墙被挖洞”看起来像渲染错误")
                 .define("ghostOutline", true);
@@ -50,7 +55,7 @@ public final class Config {
                 .define("ghostFill", true);
         CULLING_SHAPE_ENABLED = COMMON_BUILDER
                 .comment("v0.3 形状/视线剔除首片（旧模组 GenericCuller3 的锥/柱近似）：把相机与玩家之间的实心地形从区块 mesh 剔除；室内由房间扫描负责，可与 blockLevel 独立开关")
-                .define("shape", true);
+                .define("shape", false);
         CULLING_SHAPE_RADIUS = COMMON_BUILDER
                 .comment("形状剔除圆柱半径（格，对应旧模组 cullAngle 默认 6.0）")
                 .defineInRange("shapeRadius", 2.5D, 0.0D, 32.0D);
@@ -59,14 +64,30 @@ public final class Config {
                 .defineInRange("shapeConeHalfAngle", 30.0D, 0.0D, 89.0D);
         CULLING_SIGHTLINE_ENABLED = COMMON_BUILDER
                 .comment("v0.3 视线/轮廓剔除（旧模组 SightlineScanner）：按相机→玩家 27 条射线命中的连通形状整块判定，挡住视线多数的形状整体剔除、挡得少的整块保护，避免把家具/柱子挖出洞")
-                .define("sightline", true);
+                .define("sightline", false);
         CULLING_SIGHTLINE_OCCLUDE_THRESHOLD = COMMON_BUILDER
                 .comment("形状被判定为\"遮挡\"所需的射线比例（0..1）；高于该值整块剔除，低于则该形状对其它剔除层受保护")
                 .defineInRange("sightlineOccludeThreshold", 0.35D, 0.0D, 1.0D);
+        CULLING_VOLUME = COMMON_BUILDER
+                .comment("v0.4 主剔除策略：以“相机→角色眼睛”连线为轴，剔除轴附近的遮挡方块；开启时会替换 blockLevel/shape/sightline 旧策略")
+                .define("sightlineVolume", true);
+        CULLING_VOLUME_INNER_RADIUS = COMMON_BUILDER
+                .comment("视线体积内半径（格）：此范围内的方块完全透明")
+                .defineInRange("volumeInnerRadius", 3.0D, 0.0D, 16.0D);
+        CULLING_VOLUME_OUTER_RADIUS = COMMON_BUILDER
+                .comment("视线体积外半径（格）：超出该距离的方块不再透明；内外之间透明度快速上升")
+                .defineInRange("volumeOuterRadius", 8.0D, 1.0D, 32.0D);
+        CULLING_VOLUME_MAX_ALPHA = COMMON_BUILDER
+                .comment("视线体积外缘的幽灵方块最大不透明度（0=完全透明，1=不透明）")
+                .defineInRange("volumeMaxAlpha", 0.45D, 0.0D, 1.0D);
+        CULLING_ROOM_MAX_DISTANCE = COMMON_BUILDER
+                .comment("房间剔除的最大水平距离（格）：离角色更远的房间方块不再剔除")
+                .defineInRange("roomMaxDistance", 24.0D, 4.0D, 96.0D);
         COMMON_BUILDER.pop();
 
         COMMON_BUILDER.comment("调试输出").push("debug");
         DEBUG_OVERLAY = COMMON_BUILDER.comment("显示相机状态/指令栈/剔除统计的覆盖层").define("overlay", false);
+
         COMMON_BUILDER.pop();
     }
 
