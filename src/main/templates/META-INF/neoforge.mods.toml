@@ -9,8 +9,7 @@ version="${mod_version}"
 displayName="${mod_name}"
 authors="Yanbwe"
 description='''
-Modular Perspective（模块化俯视角）—— 面向 NeoForge 1.21.1 的双端俯视角/正交视角框架：
-服务端以指令描述镜头，客户端做通道化仲裁与应用。设计文档见 docs/design.md（docs 不入 git）。
+Modular Perspective（模块化俯视角）—— 面向 NeoForge 1.21.1 的双端俯视角/正交视角框架。
 '''
 
 [[mixins]]
