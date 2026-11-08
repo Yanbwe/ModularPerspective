@@ -1,21 +1,37 @@
 package org.yanbwe.modularperspective.client.cull;
 
 import java.util.ArrayDeque;
+import java.util.concurrent.ArrayBlockingQueue;
 
+import it.unimi.dsi.fastutil.longs.Long2LongMap;
+import it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import it.unimi.dsi.fastutil.longs.LongIterator;
+import it.unimi.dsi.fastutil.longs.LongList;
+import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import it.unimi.dsi.fastutil.longs.LongSet;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.chunk.PalettedContainer;
 import org.yanbwe.modularperspective.Config;
+import org.yanbwe.modularperspective.ModularPerspective;
 
 /**
- * Room scan (v0.3 parity pass): works out the vertical spans that cover the room the player is
- * standing in, and decides for every block whether it belongs to the cover (cull), is above the
- * cover (keep, so other culling tiers cannot remove it) or is inside the room (no opinion, the
- * ray culler keeps handling interior obstructions).
+ * Room scan (v0.3 parity pass, worker threading): works out the vertical spans that cover the room
+ * the player is standing in, and decides for every block whether it belongs to the cover (cull), is
+ * above the cover (keep, so other culling tiers cannot remove it) or is inside the room (no
+ * opinion, the ray culler keeps handling interior obstructions).
  *
  * <p>The pipeline mirrors the prototype mod's RoomScanner / RoomSnapshot semantics:
  * <ol>
@@ -28,9 +44,13 @@ import org.yanbwe.modularperspective.Config;
  *       the whole scan bails out and lets the outdoor tier own the space.</li>
  * </ol>
  *
- * <p>Deliberately simpler than the prototype in two places: the scan runs on the client thread
- * inside a visit budget (the prototype uses a budgeted worker), and there is no incremental
- * section-hash bookkeeping yet. Both are candidates for the v0.3 follow-up.
+ * <p>Like the prototype, the scan no longer runs on the client thread: the client thread captures a
+ * cheap copy of the loaded chunk sections around the player ({@link SectionView}), hands it to a
+ * single budgeted worker thread, and the resulting snapshot is swapped in on the client thread on a
+ * later tick. The client thread only pays for the section copy and the snapshot swap.
+ *
+ * <p>Deliberately simpler than the prototype in one place: there is no incremental section-hash
+ * bookkeeping yet (a scan re-reads the whole captured box).
  */
 public final class RoomScanner {
     /** This snapshot has no opinion on the block; query the next culling tier. */
@@ -61,7 +81,7 @@ public final class RoomScanner {
     private static final int MAX_HOLE_FILL_PASSES = 32;
     /** Flood visit budget per scan. */
     private static final int MAX_FLOOD_VISITS = 16000;
-    /** 单次扫描硬预算；超时保留旧快照并下一 tick 重试（原模组 worker/预算的同步近似）。 */
+    /** 单次扫描硬预算；超时保留旧快照并等下一轮（原模组 worker/预算的近似）。 */
     private static final long SCAN_BUDGET_NANOS = 3_000_000L;
     /** How far above the head we look for a ceiling before running the full flood. */
     private static final int CEILING_PROBE = 8;
@@ -77,6 +97,9 @@ public final class RoomScanner {
     private static final long RESCAN_INTERVAL_TICKS = 20L;
     private static final double RESCAN_MOVE_SQ = 0.25D;
 
+    /** Horizontal capture radius: flood radius plus the footprint pad and a safety margin. */
+    private static final int CAPTURE_RADIUS = RADIUS + WALL_THICKNESS + 2;
+
     private static final long NO_COLUMN = Long.MIN_VALUE;
 
     private static final RoomScanner INSTANCE = new RoomScanner();
@@ -87,13 +110,13 @@ public final class RoomScanner {
 
     /** Immutable result of one scan. */
     private static final class Snapshot {
-        private final it.unimi.dsi.fastutil.longs.Long2LongMap columns;
+        private final Long2LongMap columns;
         private final long contentHash;
         private final int roofColumns;
         private final int wallColumns;
         private final int openSkyColumns;
 
-        private Snapshot(it.unimi.dsi.fastutil.longs.Long2LongMap columns, long contentHash, int roofColumns,
+        private Snapshot(Long2LongMap columns, long contentHash, int roofColumns,
                 int wallColumns, int openSkyColumns) {
             this.columns = columns;
             this.contentHash = contentHash;
@@ -101,6 +124,107 @@ public final class RoomScanner {
             this.wallColumns = wallColumns;
             this.openSkyColumns = openSkyColumns;
             this.columns.defaultReturnValue(NO_COLUMN);
+        }
+    }
+
+    /**
+     * A read-only copy of the block solidity around the player, made on the client thread so the
+     * worker never touches the live level. Sections are copied as vanilla paletted containers (the
+     * same copy used by chunk serialization), so concurrent block updates can no longer race us.
+     */
+    private static final class SectionView {
+        private final Long2ObjectMap<PalettedContainer<BlockState>> sections;
+        private final LongSet loadedChunks;
+        private final int minX;
+        private final int maxX;
+        private final int minZ;
+        private final int maxZ;
+        private final int minY;
+        private final int maxY;
+
+        private SectionView(Long2ObjectMap<PalettedContainer<BlockState>> sections, LongSet loadedChunks,
+                int minX, int maxX, int minZ, int maxZ, int minY, int maxY) {
+            this.sections = sections;
+            this.loadedChunks = loadedChunks;
+            this.minX = minX;
+            this.maxX = maxX;
+            this.minZ = minZ;
+            this.maxZ = maxZ;
+            this.minY = minY;
+            this.maxY = maxY;
+        }
+
+        private boolean isLoaded(int x, int y, int z) {
+            if (y < this.minY || y > this.maxY || x < this.minX || x > this.maxX || z < this.minZ || z > this.maxZ) {
+                return false;
+            }
+            return this.loadedChunks.contains(ChunkPos.asLong(x >> 4, z >> 4));
+        }
+
+        private boolean isSolid(int x, int y, int z) {
+            if (!this.isLoaded(x, y, z)) {
+                return false;
+            }
+            PalettedContainer<BlockState> container = this.sections.get(SectionPos.asLong(x >> 4, y >> 4, z >> 4));
+            if (container == null) {
+                return false;
+            }
+            return solidRender(container.get(x & 15, y & 15, z & 15));
+        }
+    }
+
+    /** A scan request handed from the client thread to the worker. */
+    private static final class ScanRequest {
+        private final long epoch;
+        private final SectionView view;
+        private final BlockPos playerPos;
+        private final int yMin;
+        private final int yMax;
+        private final long captureNanos;
+
+        private ScanRequest(long epoch, SectionView view, BlockPos playerPos, int yMin, int yMax, long captureNanos) {
+            this.epoch = epoch;
+            this.view = view;
+            this.playerPos = playerPos;
+            this.yMin = yMin;
+            this.yMax = yMax;
+            this.captureNanos = captureNanos;
+        }
+    }
+
+    /** Worker output: either a closed footprint or a bail-out reason. */
+    private static final class ScanResult {
+        private final long epoch;
+        private final Long2LongMap columns;
+        private final long contentHash;
+        private final int roofColumns;
+        private final int wallColumns;
+        private final int openSky;
+        private final int visits;
+        private final String bailReason;
+        private final boolean budgetExceeded;
+        private final long computeNanos;
+        private final long captureNanos;
+
+        private ScanResult(long epoch, Long2LongMap columns, long contentHash, int roofColumns, int wallColumns,
+                int openSky, int visits, String bailReason, boolean budgetExceeded, long computeNanos,
+                long captureNanos) {
+            this.epoch = epoch;
+            this.columns = columns;
+            this.contentHash = contentHash;
+            this.roofColumns = roofColumns;
+            this.wallColumns = wallColumns;
+            this.openSky = openSky;
+            this.visits = visits;
+            this.bailReason = bailReason;
+            this.budgetExceeded = budgetExceeded;
+            this.computeNanos = computeNanos;
+            this.captureNanos = captureNanos;
+        }
+
+        private static ScanResult bail(long epoch, String reason, int visits, boolean budget, long computeNanos,
+                long captureNanos) {
+            return new ScanResult(epoch, null, 0L, 0, 0, 0, visits, reason, budget, computeNanos, captureNanos);
         }
     }
 
@@ -115,6 +239,14 @@ public final class RoomScanner {
     private BlockPos lastScanPos;
     private Object lastDimension;
 
+    /** Bumped whenever a pending scan must be discarded (reset / world change). */
+    private volatile long scanEpoch;
+    /** True while the worker owns a request; the client thread only polls the result. */
+    private boolean scanInFlight;
+    private volatile ScanResult pendingResult;
+    private final ArrayBlockingQueue<ScanRequest> requests = new ArrayBlockingQueue<>(1);
+    private Thread scanThread;
+
     private RoomScanner() {
     }
 
@@ -128,7 +260,7 @@ public final class RoomScanner {
         return this.type;
     }
 
-    /** Microseconds spent in the last completed scan. */
+    /** Microseconds spent in the last completed scan (capture + worker compute). */
     public long lastScanMicros() {
         return this.lastScanNanos / 1000L;
     }
@@ -226,7 +358,7 @@ public final class RoomScanner {
         }
         int emitted = 0;
         BlockPos.MutableBlockPos cursor = new BlockPos.MutableBlockPos();
-        for (it.unimi.dsi.fastutil.longs.LongIterator it = snap.columns.keySet().iterator(); it.hasNext(); ) {
+        for (LongIterator it = snap.columns.keySet().iterator(); it.hasNext(); ) {
             long xz = it.nextLong();
             long packed = snap.columns.get(xz);
             int roofBase = (int) (packed >>> 32);
@@ -254,6 +386,10 @@ public final class RoomScanner {
     }
 
     public void reset() {
+        this.scanEpoch++;
+        this.pendingResult = null;
+        this.scanInFlight = false;
+        this.requests.clear();
         this.snapshot = null;
         this.type = Type.OUTDOOR;
         this.lastResult = "reset";
@@ -271,11 +407,13 @@ public final class RoomScanner {
             return;
         }
         if (!Config.CULLING_ENABLED.get()) {
-            if (this.snapshot != null) {
+            if (this.snapshot != null || this.scanInFlight) {
                 reset();
             }
             return;
         }
+
+        pollResult();
 
         BlockPos pos = minecraft.player.blockPosition();
         Object dimension = level.dimension().location();
@@ -287,43 +425,193 @@ public final class RoomScanner {
                 || gameTime - this.lastScanTick >= RESCAN_INTERVAL_TICKS
                 || this.lastScanPos == null
                 || pos.distSqr(this.lastScanPos) >= RESCAN_MOVE_SQ;
-        if (!due) {
+        if (!due || this.scanInFlight) {
             return;
         }
-        this.lastScanTick = gameTime;
-        this.lastScanPos = pos.immutable();
-        this.lastDimension = dimension;
-        this.dirty = false;
-        scan(level, pos);
+        startScan(level, pos, gameTime, dimension);
     }
 
-    // ------------------------------------------------------------------ scanning
+    // ------------------------------------------------------------------ client thread: capture + dispatch
 
-    private void scan(Level level, BlockPos playerPos) {
-        long scanStart = System.nanoTime();
+    private void startScan(Level level, BlockPos playerPos, long gameTime, Object dimension) {
+        this.lastScanTick = gameTime;
+        this.lastScanPos = playerPos.immutable();
+        this.lastDimension = dimension;
+        this.dirty = false;
+
         BlockPos start = playerPos.above();
         if (!hasCeilingNearby(level, start)) {
             bailOut("open sky above player", 0);
             return;
         }
+
+        long captureStart = System.nanoTime();
         int yMin = start.getY() - MAX_VERTICAL_DOWN;
         int yMax = start.getY() + MAX_VERTICAL_UP;
+        SectionView view = captureView(level, start, yMin, yMax);
+        long captureNanos = System.nanoTime() - captureStart;
+        if (view == null) {
+            bailOut("chunk capture failed (no loaded sections)", 0);
+            return;
+        }
+
+        ensureWorker();
+        ScanRequest request = new ScanRequest(this.scanEpoch, view, playerPos.immutable(), yMin, yMax, captureNanos);
+        if (!this.requests.offer(request)) {
+            // A previous request is still queued; the next interval will try again.
+            this.lastResult = "scan request already queued";
+            return;
+        }
+        this.scanInFlight = true;
+    }
+
+    private SectionView captureView(Level level, BlockPos start, int yMin, int yMax) {
+        int cx0 = (start.getX() - CAPTURE_RADIUS) >> 4;
+        int cx1 = (start.getX() + CAPTURE_RADIUS) >> 4;
+        int cz0 = (start.getZ() - CAPTURE_RADIUS) >> 4;
+        int cz1 = (start.getZ() + CAPTURE_RADIUS) >> 4;
+        int topY = yMax + ROOF_SEARCH_MARGIN + COVER_HEIGHT;
+        int bottomY = Math.max(level.getMinBuildHeight(), yMin - 1);
+        int topClamped = Math.min(level.getMaxBuildHeight() - 1, topY);
+
+        Long2ObjectMap<PalettedContainer<BlockState>> sections = new Long2ObjectOpenHashMap<>();
+        LongSet loadedChunks = new LongOpenHashSet();
+        int loaded = 0;
+        for (int cx = cx0; cx <= cx1; cx++) {
+            for (int cz = cz0; cz <= cz1; cz++) {
+                if (!level.hasChunk(cx, cz)) {
+                    continue;
+                }
+                LevelChunk chunk = level.getChunk(cx, cz);
+                if (chunk == null || chunk.isEmpty()) {
+                    if (chunk != null) {
+                        loadedChunks.add(ChunkPos.asLong(cx, cz));
+                        loaded++;
+                    }
+                    continue;
+                }
+                loadedChunks.add(ChunkPos.asLong(cx, cz));
+                loaded++;
+                int secY0 = SectionPos.blockToSectionCoord(bottomY);
+                int secY1 = SectionPos.blockToSectionCoord(topClamped);
+                for (int secY = secY0; secY <= secY1; secY++) {
+                    int index = chunk.getSectionIndexFromSectionY(secY);
+                    if (index < 0 || index >= chunk.getSections().length) {
+                        continue;
+                    }
+                    LevelChunkSection section = chunk.getSection(index);
+                    if (section == null || section.hasOnlyAir()) {
+                        continue;
+                    }
+                    sections.put(SectionPos.asLong(cx, secY, cz), section.getStates().copy());
+                }
+            }
+        }
+        if (loaded == 0) {
+            return null;
+        }
+        return new SectionView(sections, loadedChunks,
+                start.getX() - CAPTURE_RADIUS, start.getX() + CAPTURE_RADIUS,
+                start.getZ() - CAPTURE_RADIUS, start.getZ() + CAPTURE_RADIUS,
+                level.getMinBuildHeight(), level.getMaxBuildHeight() - 1);
+    }
+
+    private void ensureWorker() {
+        if (this.scanThread != null) {
+            return;
+        }
+        Thread thread = new Thread(this::workerLoop, "modularperspective-room-scan");
+        thread.setDaemon(true);
+        thread.setPriority(Thread.MIN_PRIORITY + 1);
+        this.scanThread = thread;
+        thread.start();
+    }
+
+    private void workerLoop() {
+        while (true) {
+            ScanRequest request;
+            try {
+                request = this.requests.take();
+            } catch (InterruptedException e) {
+                return;
+            }
+            ScanResult result;
+            try {
+                result = scan(request);
+            } catch (Throwable t) {
+                result = ScanResult.bail(request.epoch, "scan error: " + t, 0, false, 0L, request.captureNanos);
+            }
+            this.pendingResult = result;
+        }
+    }
+
+    private void pollResult() {
+        ScanResult result = this.pendingResult;
+        if (result == null) {
+            return;
+        }
+        this.pendingResult = null;
+        this.scanInFlight = false;
+        if (result.epoch != this.scanEpoch) {
+            return;
+        }
+        long elapsed = result.captureNanos + result.computeNanos;
+        this.lastScanNanos = elapsed;
+        this.maxScanNanos = Math.max(this.maxScanNanos, elapsed);
+        if (result.bailReason != null) {
+            if (result.budgetExceeded) {
+                this.lastResult = result.bailReason + " (" + (elapsed / 1000L) + "us)";
+                return;
+            }
+            this.snapshot = null;
+            this.type = Type.OUTDOOR;
+            this.lastResult = result.bailReason;
+            this.openSkyDiag = result.openSky;
+            return;
+        }
+        Snapshot previous = this.snapshot;
+        if (previous != null && previous.contentHash == result.contentHash
+                && previous.columns.size() == result.columns.size()) {
+            this.lastResult = "unchanged (" + result.columns.size() + " columns)";
+            return;
+        }
+        this.snapshot = new Snapshot(result.columns, result.contentHash, result.roofColumns, result.wallColumns,
+                result.openSky);
+        this.type = Type.INDOOR;
+        this.lastResult = "INDOOR columns=" + result.columns.size() + " roof=" + result.roofColumns
+                + " wall=" + result.wallColumns + " openSky=" + result.openSky;
+        ModularPerspective.LOGGER.info(
+                "[room] published columns={} roof={} wall={} openSky={} took={}us capture={}us visits={}",
+                result.columns.size(), result.roofColumns, result.wallColumns, result.openSky, elapsed / 1000L,
+                result.captureNanos / 1000L, result.visits);
+    }
+
+    // ------------------------------------------------------------------ worker thread
+
+    private ScanResult scan(ScanRequest request) {
+        long start = System.nanoTime();
+        SectionView view = request.view;
+        BlockPos playerPos = request.playerPos;
+        BlockPos startPos = playerPos.above();
+        int yMin = request.yMin;
+        int yMax = request.yMax;
 
         ArrayDeque<BlockPos> queue = new ArrayDeque<>();
         LongSet visited = new LongOpenHashSet();
         LongSet roomColumns = new LongOpenHashSet();
         it.unimi.dsi.fastutil.longs.Long2IntMap topAir = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
-        it.unimi.dsi.fastutil.longs.LongList columnList = new it.unimi.dsi.fastutil.longs.LongArrayList();
+        LongList columnList = new LongArrayList();
 
-        queue.add(start);
-        visited.add(start.asLong());
+        queue.add(startPos);
+        visited.add(startPos.asLong());
         int visits = 0;
         while (!queue.isEmpty() && visits < MAX_FLOOD_VISITS) {
             BlockPos current = queue.pollFirst();
             visits++;
-            if ((visits & 0x3F) == 0 && System.nanoTime() - scanStart > SCAN_BUDGET_NANOS) {
-                bailOut("flood over budget after " + visits + " visits - probably outdoors", 0);
-                return;
+            if ((visits & 0x3F) == 0 && System.nanoTime() - start > SCAN_BUDGET_NANOS) {
+                return ScanResult.bail(request.epoch,
+                        "flood over budget after " + visits + " visits - probably outdoors",
+                        0, true, System.nanoTime() - start, request.captureNanos);
             }
             long xz = packXZ(current.getX(), current.getZ());
             if (roomColumns.add(xz)) {
@@ -336,7 +624,7 @@ public final class RoomScanner {
                 }
             }
 
-            for (net.minecraft.core.Direction direction : net.minecraft.core.Direction.values()) {
+            for (Direction direction : Direction.values()) {
                 BlockPos next = current.relative(direction);
                 if (next.getY() < yMin || next.getY() > yMax) {
                     continue;
@@ -349,34 +637,32 @@ public final class RoomScanner {
                 if (!visited.add(next.asLong())) {
                     continue;
                 }
-                BlockState state = level.getBlockState(next);
-                if (!state.isSolidRender(level, next)) {
+                if (!view.isSolid(next.getX(), next.getY(), next.getZ())) {
                     queue.add(next.immutable());
                 }
             }
         }
 
-
         if (Config.DEBUG_OVERLAY.get()) {
-            org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] flood columns={} visits={}", columnList.size(), visits);
+            ModularPerspective.LOGGER.info("[room] flood columns={} visits={}", columnList.size(), visits);
         }
         if (visits >= MAX_FLOOD_VISITS) {
-            bailOut("flood visit budget exhausted (probably outdoors)", 0);
-            return;
+            return ScanResult.bail(request.epoch, "flood visit budget exhausted (probably outdoors)", 0, false,
+                    System.nanoTime() - start, request.captureNanos);
         }
         if (columnList.isEmpty()) {
-            bailOut("player is under open sky - not in a room", 0);
-            return;
+            return ScanResult.bail(request.epoch, "player is under open sky - not in a room", 0, false,
+                    System.nanoTime() - start, request.captureNanos);
         }
 
         // Stage 2: per-column roof solve.
-        int searchTop = start.getY() + MAX_VERTICAL_UP + ROOF_SEARCH_MARGIN;
-        it.unimi.dsi.fastutil.longs.Long2LongMap roofs = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap(columnList.size());
+        int searchTop = startPos.getY() + MAX_VERTICAL_UP + ROOF_SEARCH_MARGIN;
+        Long2LongMap roofs = new Long2LongOpenHashMap(columnList.size());
         int openSky = 0;
         for (int i = 0; i < columnList.size(); i++) {
-            if ((i & 0x1F) == 0 && System.nanoTime() - scanStart > SCAN_BUDGET_NANOS) {
-                abortBudget("roof solve", scanStart);
-                return;
+            if ((i & 0x1F) == 0 && System.nanoTime() - start > SCAN_BUDGET_NANOS) {
+                return ScanResult.bail(request.epoch, "scan budget exceeded in roof solve", 0, true,
+                        System.nanoTime() - start, request.captureNanos);
             }
             long xz = columnList.getLong(i);
             int x = unpackX(xz);
@@ -384,12 +670,10 @@ public final class RoomScanner {
             int y = topAir.get(xz) + 1;
             int roofBase = Integer.MIN_VALUE;
             while (y <= searchTop) {
-                BlockPos probe = new BlockPos(x, y, z);
-                if (!level.isLoaded(probe)) {
+                if (!view.isLoaded(x, y, z)) {
                     break;
                 }
-                BlockState state = level.getBlockState(probe);
-                if (state.isSolidRender(level, probe)) {
+                if (view.isSolid(x, y, z)) {
                     roofBase = y;
                     break;
                 }
@@ -404,11 +688,10 @@ public final class RoomScanner {
             int roofTop = roofBase;
             int limit = roofBase + COVER_HEIGHT;
             for (int probeY = roofBase + 1; probeY <= limit; probeY++) {
-                BlockPos probe = new BlockPos(x, probeY, z);
-                if (!level.isLoaded(probe)) {
+                if (!view.isLoaded(x, probeY, z)) {
                     break;
                 }
-                if (level.getBlockState(probe).isSolidRender(level, probe)) {
+                if (view.isSolid(x, probeY, z)) {
                     roofTop = probeY;
                 }
             }
@@ -416,34 +699,28 @@ public final class RoomScanner {
         }
 
         if (Config.DEBUG_OVERLAY.get()) {
-            org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] roof solve columns={} openSky={}", columnList.size(), openSky);
+            ModularPerspective.LOGGER.info("[room] roof solve columns={} openSky={}", columnList.size(), openSky);
         }
         if (openSky > columnList.size() * OPEN_SKY_BAIL_RATIO) {
-            bailOut("player is under open sky (" + openSky + "/" + columnList.size() + " columns) - not in a room", openSky);
-            return;
+            return ScanResult.bail(request.epoch, "player is under open sky (" + openSky + "/" + columnList.size()
+                    + " columns) - not in a room", 0, false, System.nanoTime() - start, request.captureNanos);
         }
 
         // Stage 3: close the footprint (dilate over walls, fill enclosed holes).
-        it.unimi.dsi.fastutil.longs.Long2LongMap closed = closeFootprint(level, roofs, openSky);
-        if (System.nanoTime() - scanStart > SCAN_BUDGET_NANOS) {
-            abortBudget("footprint close", scanStart);
-            return;
+        Long2LongMap closed = closeFootprint(view, roofs);
+        if (System.nanoTime() - start > SCAN_BUDGET_NANOS) {
+            return ScanResult.bail(request.epoch, "scan budget exceeded in footprint close", 0, true,
+                    System.nanoTime() - start, request.captureNanos);
         }
         if (closed == null) {
-            bailOut("footprint close failed", openSky);
-            return;
+            return ScanResult.bail(request.epoch, "footprint close failed", 0, false,
+                    System.nanoTime() - start, request.captureNanos);
         }
 
         long hash = contentHash(closed);
-        Snapshot previous = this.snapshot;
-        if (previous != null && previous.contentHash == hash && previous.columns.size() == closed.size()) {
-            this.lastResult = "unchanged (" + closed.size() + " columns)";
-            return;
-        }
-
         int roofColumns = 0;
         int wallColumns = 0;
-        for (it.unimi.dsi.fastutil.longs.Long2LongMap.Entry entry : closed.long2LongEntrySet()) {
+        for (Long2LongMap.Entry entry : closed.long2LongEntrySet()) {
             long packed = entry.getLongValue();
             if ((int) (packed >>> 32) == OPEN_SKY) {
                 continue;
@@ -455,14 +732,9 @@ public final class RoomScanner {
             }
         }
 
-        this.snapshot = new Snapshot(closed, hash, roofColumns, wallColumns, openSky);
-        this.type = Type.INDOOR;
-        long elapsed = System.nanoTime() - scanStart;
-        this.lastScanNanos = elapsed;
-        this.maxScanNanos = Math.max(this.maxScanNanos, elapsed);
-        org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] published columns={} roof={} wall={} openSky={} took={}us", closed.size(), roofColumns, wallColumns, openSky, elapsed / 1000L);
-        this.lastResult = "INDOOR columns=" + closed.size() + " roof=" + roofColumns + " wall=" + wallColumns
-                + " openSky=" + openSky;
+        long computeNanos = System.nanoTime() - start;
+        return new ScanResult(request.epoch, closed, hash, roofColumns, wallColumns, openSky, visits, null, false,
+                computeNanos, request.captureNanos);
     }
 
     private static boolean hasCeilingNearby(Level level, BlockPos start) {
@@ -479,14 +751,11 @@ public final class RoomScanner {
         return false;
     }
 
-    /** A scan that runs over budget keeps the previous snapshot and retries next tick. */
-    private void abortBudget(String stage, long scanStart) {
-        long micros = (System.nanoTime() - scanStart) / 1000L;
-        this.lastResult = "scan budget exceeded in " + stage + " (" + micros + "us)";
-        this.dirty = false;
-    }
-
     private void bailOut(String reason, int openSky) {
+        this.scanEpoch++;
+        this.pendingResult = null;
+        this.scanInFlight = false;
+        this.requests.clear();
         this.snapshot = null;
         this.type = Type.OUTDOOR;
         this.lastResult = reason;
@@ -494,13 +763,12 @@ public final class RoomScanner {
         this.dirty = false;
     }
 
-    private it.unimi.dsi.fastutil.longs.Long2LongMap closeFootprint(Level level,
-            it.unimi.dsi.fastutil.longs.Long2LongMap roofs, int openSky) {
+    private Long2LongMap closeFootprint(SectionView view, Long2LongMap roofs) {
         int minX = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE;
         int minZ = Integer.MAX_VALUE;
         int maxZ = Integer.MIN_VALUE;
-        for (it.unimi.dsi.fastutil.longs.LongIterator it = roofs.keySet().iterator(); it.hasNext(); ) {
+        for (LongIterator it = roofs.keySet().iterator(); it.hasNext(); ) {
             long xz = it.nextLong();
             int x = unpackX(xz);
             int z = unpackZ(xz);
@@ -536,7 +804,7 @@ public final class RoomScanner {
         int[] base = new int[w * h];
         int[] top = new int[w * h];
 
-        for (it.unimi.dsi.fastutil.longs.LongIterator it = roofs.keySet().iterator(); it.hasNext(); ) {
+        for (LongIterator it = roofs.keySet().iterator(); it.hasNext(); ) {
             long xz = it.nextLong();
             long packed = roofs.get(xz);
             int roofBase = (int) (packed >>> 32);
@@ -550,10 +818,10 @@ public final class RoomScanner {
             }
         }
 
-        dilate(level, state, base, top, w, h, gx0, gz0);
-        fillEnclosedHoles(level, state, base, top, w, h);
+        dilate(view, state, base, top, w, h, gx0, gz0);
+        fillEnclosedHoles(state, base, top, w, h);
 
-        it.unimi.dsi.fastutil.longs.Long2LongMap out = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap(roofs.size() * 2);
+        Long2LongMap out = new Long2LongOpenHashMap(roofs.size() * 2);
         for (int ix = 0; ix < w; ix++) {
             for (int iz = 0; iz < h; iz++) {
                 int idx = ix * h + iz;
@@ -566,7 +834,7 @@ public final class RoomScanner {
         return out;
     }
 
-    private void dilate(Level level, byte[] state, int[] base, int[] top, int w, int h, int gx0, int gz0) {
+    private void dilate(SectionView view, byte[] state, int[] base, int[] top, int w, int h, int gx0, int gz0) {
         for (int pass = 0; pass < WALL_THICKNESS; pass++) {
             byte[] before = state.clone();
             for (int ix = 0; ix < w; ix++) {
@@ -601,8 +869,9 @@ public final class RoomScanner {
                     if (!any) {
                         continue;
                     }
-                    BlockPos wallProbe = new BlockPos(gx0 + ix, b - 1, gz0 + iz);
-                    if (level.isLoaded(wallProbe) && level.getBlockState(wallProbe).isSolidRender(level, wallProbe)) {
+                    int wallX = gx0 + ix;
+                    int wallZ = gz0 + iz;
+                    if (view.isLoaded(wallX, b - 1, wallZ) && view.isSolid(wallX, b - 1, wallZ)) {
                         state[idx] = CELL_CLAIMED;
                         base[idx] = b;
                         top[idx] = t;
@@ -612,7 +881,7 @@ public final class RoomScanner {
         }
     }
 
-    private void fillEnclosedHoles(Level level, byte[] state, int[] base, int[] top, int w, int h) {
+    private void fillEnclosedHoles(byte[] state, int[] base, int[] top, int w, int h) {
         // Grid cells here only live inside the bounds around the room, so the border of the array is
         // "outside". Open-sky columns are outside anchors as well: anything touching one is open.
         boolean[] outside = new boolean[w * h];
@@ -716,9 +985,15 @@ public final class RoomScanner {
         return cell == CELL_ROOM || cell == CELL_CLAIMED;
     }
 
-    private static long contentHash(it.unimi.dsi.fastutil.longs.Long2LongMap columns) {
+    /** Level-free equivalent of {@code BlockState#isSolidRender} (uses the same cached rule). */
+    private static boolean solidRender(BlockState state) {
+        return state.canOcclude()
+                && Block.isShapeFullBlock(state.getOcclusionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO));
+    }
+
+    private static long contentHash(Long2LongMap columns) {
         long hash = 0x9E3779B97F4A7C15L;
-        for (it.unimi.dsi.fastutil.longs.Long2LongMap.Entry entry : columns.long2LongEntrySet()) {
+        for (Long2LongMap.Entry entry : columns.long2LongEntrySet()) {
             long key = entry.getLongKey() * 0xC2B2AE3D27D4EB4FL;
             hash ^= key ^ (entry.getLongValue() * 0x165667B19E3779F9L);
             hash = Long.rotateLeft(hash, 27) * 0x9E3779B97F4A7C15L;
