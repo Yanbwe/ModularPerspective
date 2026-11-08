@@ -222,6 +222,9 @@ public final class BlockCuller {
             if (center.getY() < minY || SectionPos.asLong(center) == playerSection || RoomScanner.get().test(center) == RoomScanner.get().KEEP) {
                 continue;
             }
+            if (SightlineScanner.get().isProtected(center)) {
+                continue;
+            }
             BlockState state = level.getBlockState(center);
             if (!state.isSolidRender(level, center)) {
                 continue;
@@ -280,6 +283,9 @@ public final class BlockCuller {
                     if (neighbor.getY() < minY || SectionPos.asLong(neighbor) == playerSection || RoomScanner.get().test(neighbor) == RoomScanner.get().KEEP) {
                         continue;
                     }
+                    if (SightlineScanner.get().isProtected(neighbor)) {
+                        continue;
+                    }
                     double dx = neighbor.getX() + 0.5D - lastCamera.x;
                     double dy = neighbor.getY() + 0.5D - lastCamera.y;
                     double dz = neighbor.getZ() + 0.5D - lastCamera.z;
@@ -318,6 +324,9 @@ public final class BlockCuller {
                     BlockPos pos = center.offset(dx, dy, dz);
                     long key = pos.asLong();
                     if (NEXT_CULLED.contains(key)) {
+                        continue;
+                    }
+                    if (SightlineScanner.get().isProtected(pos)) {
                         continue;
                     }
                     BlockState state = level.getBlockState(pos);
@@ -369,6 +378,9 @@ public final class BlockCuller {
                         continue;
                     }
                     if (!roomIndoor && RoomScanner.get().test(new BlockPos(x, y, z)) == RoomScanner.KEEP) {
+                        continue;
+                    }
+                    if (SightlineScanner.get().isProtected(probe)) {
                         continue;
                     }
                     if (NEXT_CULLED.add(probe.asLong())) {

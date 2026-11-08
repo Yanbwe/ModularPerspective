@@ -92,6 +92,7 @@ public final class RoomScanner {
     private static final int RADIUS = 24;
     /** Default wall thickness in columns. */
     private static final int WALL_THICKNESS = 2;
+    /** Widest wall-line gap still reported as a doorway (2-wide doors are the common case). */
     /** Default cover height searched for above the first roof block. */
     private static final int COVER_HEIGHT = 24;
     private static final long RESCAN_INTERVAL_TICKS = 20L;
@@ -115,14 +116,16 @@ public final class RoomScanner {
         private final int roofColumns;
         private final int wallColumns;
         private final int openSkyColumns;
+        private final int doorways;
 
         private Snapshot(Long2LongMap columns, long contentHash, int roofColumns,
-                int wallColumns, int openSkyColumns) {
+                int wallColumns, int openSkyColumns, int doorways) {
             this.columns = columns;
             this.contentHash = contentHash;
             this.roofColumns = roofColumns;
             this.wallColumns = wallColumns;
             this.openSkyColumns = openSkyColumns;
+            this.doorways = doorways;
             this.columns.defaultReturnValue(NO_COLUMN);
         }
     }
@@ -200,6 +203,7 @@ public final class RoomScanner {
         private final int roofColumns;
         private final int wallColumns;
         private final int openSky;
+        private final int doorways;
         private final int visits;
         private final String bailReason;
         private final boolean budgetExceeded;
@@ -207,14 +211,15 @@ public final class RoomScanner {
         private final long captureNanos;
 
         private ScanResult(long epoch, Long2LongMap columns, long contentHash, int roofColumns, int wallColumns,
-                int openSky, int visits, String bailReason, boolean budgetExceeded, long computeNanos,
-                long captureNanos) {
+                int openSky, int doorways, int visits, String bailReason, boolean budgetExceeded,
+                long computeNanos, long captureNanos) {
             this.epoch = epoch;
             this.columns = columns;
             this.contentHash = contentHash;
             this.roofColumns = roofColumns;
             this.wallColumns = wallColumns;
             this.openSky = openSky;
+            this.doorways = doorways;
             this.visits = visits;
             this.bailReason = bailReason;
             this.budgetExceeded = budgetExceeded;
@@ -224,7 +229,7 @@ public final class RoomScanner {
 
         private static ScanResult bail(long epoch, String reason, int visits, boolean budget, long computeNanos,
                 long captureNanos) {
-            return new ScanResult(epoch, null, 0L, 0, 0, 0, visits, reason, budget, computeNanos, captureNanos);
+            return new ScanResult(epoch, null, 0L, 0, 0, 0, 0, visits, reason, budget, computeNanos, captureNanos);
         }
     }
 
@@ -316,6 +321,12 @@ public final class RoomScanner {
     public int columnCount() {
         Snapshot snap = this.snapshot;
         return snap == null ? 0 : snap.columns.size();
+    }
+
+    /** Number of doorway columns crossing the room's wall ring (v0.3 parity, see DoorwayCounter). */
+    public int doorwayCount() {
+        Snapshot snap = this.snapshot;
+        return snap == null ? 0 : snap.doorways;
     }
 
     /** Compatibility alias: number of room columns that got a cover span. */
@@ -576,14 +587,14 @@ public final class RoomScanner {
             return;
         }
         this.snapshot = new Snapshot(result.columns, result.contentHash, result.roofColumns, result.wallColumns,
-                result.openSky);
+                result.openSky, result.doorways);
         this.type = Type.INDOOR;
         this.lastResult = "INDOOR columns=" + result.columns.size() + " roof=" + result.roofColumns
-                + " wall=" + result.wallColumns + " openSky=" + result.openSky;
+                + " wall=" + result.wallColumns + " openSky=" + result.openSky + " doors=" + result.doorways;
         ModularPerspective.LOGGER.info(
-                "[room] published columns={} roof={} wall={} openSky={} took={}us capture={}us visits={}",
-                result.columns.size(), result.roofColumns, result.wallColumns, result.openSky, elapsed / 1000L,
-                result.captureNanos / 1000L, result.visits);
+                "[room] published columns={} roof={} wall={} openSky={} doors={} took={}us capture={}us visits={}",
+                result.columns.size(), result.roofColumns, result.wallColumns, result.openSky, result.doorways,
+                elapsed / 1000L, result.captureNanos / 1000L, result.visits);
     }
 
     // ------------------------------------------------------------------ worker thread
@@ -707,7 +718,9 @@ public final class RoomScanner {
         }
 
         // Stage 3: close the footprint (dilate over walls, fill enclosed holes).
-        Long2LongMap closed = closeFootprint(view, roofs);
+        ClosedFootprint closedFootprint = closeFootprint(view, roofs);
+        Long2LongMap closed = closedFootprint == null ? null : closedFootprint.columns();
+        int doorways = closedFootprint == null ? 0 : closedFootprint.doorways();
         if (System.nanoTime() - start > SCAN_BUDGET_NANOS) {
             return ScanResult.bail(request.epoch, "scan budget exceeded in footprint close", 0, true,
                     System.nanoTime() - start, request.captureNanos);
@@ -733,8 +746,8 @@ public final class RoomScanner {
         }
 
         long computeNanos = System.nanoTime() - start;
-        return new ScanResult(request.epoch, closed, hash, roofColumns, wallColumns, openSky, visits, null, false,
-                computeNanos, request.captureNanos);
+        return new ScanResult(request.epoch, closed, hash, roofColumns, wallColumns, openSky, doorways, visits,
+                null, false, computeNanos, request.captureNanos);
     }
 
     private static boolean hasCeilingNearby(Level level, BlockPos start) {
@@ -763,7 +776,7 @@ public final class RoomScanner {
         this.dirty = false;
     }
 
-    private Long2LongMap closeFootprint(SectionView view, Long2LongMap roofs) {
+    private ClosedFootprint closeFootprint(SectionView view, Long2LongMap roofs) {
         int minX = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE;
         int minZ = Integer.MAX_VALUE;
@@ -797,7 +810,7 @@ public final class RoomScanner {
         int w = gx1 - gx0 + 1;
         int h = gz1 - gz0 + 1;
         if ((long) w * h > MAX_GRID_CELLS) {
-            return roofs;
+            return new ClosedFootprint(roofs, 0);
         }
 
         byte[] state = new byte[w * h];
@@ -831,9 +844,20 @@ public final class RoomScanner {
                 out.put(packXZ(gx0 + ix, gz0 + iz), packRoof(base[idx], top[idx]));
             }
         }
-        return out;
+        return new ClosedFootprint(out, DoorwayCounter.countDoorways(state, w, h));
     }
 
+    /** Closed footprint plus the number of doorway columns crossing its wall ring. */
+    private record ClosedFootprint(Long2LongMap columns, int doorways) {
+    }
+
+    /**
+     * Counts columns of room air crossed by a doorway: both +/-X neighbours are room columns and both
+     * +/-Z neighbours are claimed wall columns, or the other way around. The prototype mod has no room
+     * graph - its flood simply travels through doorways - so counting the crossing columns is how the
+     * "the room continues through this opening" fact is exposed without inventing a graph the prototype
+     * does not have.
+     */
     private void dilate(SectionView view, byte[] state, int[] base, int[] top, int w, int h, int gx0, int gz0) {
         for (int pass = 0; pass < WALL_THICKNESS; pass++) {
             byte[] before = state.clone();

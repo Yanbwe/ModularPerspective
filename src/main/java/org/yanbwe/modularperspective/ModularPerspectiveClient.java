@@ -31,6 +31,7 @@ import org.yanbwe.modularperspective.client.cull.BlockCuller;
 import org.yanbwe.modularperspective.client.cull.CullingGhostRenderer;
 import org.yanbwe.modularperspective.client.cull.RoomScanner;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
+import org.yanbwe.modularperspective.client.cull.SightlineScanner;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
 import org.yanbwe.modularperspective.client.hud.DebugHudWidget;
@@ -150,6 +151,7 @@ public final class ModularPerspectiveClient {
         if (minecraft.level == null || minecraft.player == null) {
             ClientPerspective.reset();
             CursorController.reset();
+            SightlineScanner.get().reset();
             autoTicks = 0;
             return;
         }
@@ -166,6 +168,7 @@ public final class ModularPerspectiveClient {
         ClientPerspective.tick(minecraft);
         CursorController.tick(minecraft);
         RoomScanner.get().tick(minecraft);
+        SightlineScanner.get().tick(minecraft);
         SectionCuller.tick(minecraft);
         BlockCuller.tick(minecraft);
         runAutoVerification(minecraft);
@@ -715,13 +718,77 @@ public final class ModularPerspectiveClient {
                     grabScreenshot(minecraft, "m6-shape-off.png");
                     ModularPerspective.LOGGER.info("[auto] M6 shape-off: culling={} shapeBlocks={} blocks={}",
                             BlockCuller.isCulling(), BlockCuller.shapeBlocks(), BlockCuller.culledCount());
+                    Config.CULLING_BLOCK_LEVEL.set(false);
+                    Config.CULLING_SECTION_APPROXIMATION.set(false);
+                    Config.CULLING_SHAPE_ENABLED.set(false);
+                    Config.CULLING_SIGHTLINE_ENABLED.set(true);
+                    BlockCuller.invalidate();
+                    SectionCuller.invalidate();
+                    SightlineScanner.get().reset();
+                    SightlineScanner.get().invalidate();
+                    BlockPos sightlineBase = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, sightlineBase);
+                    int solidWall = buildSightlineWall(minecraft, sightlineBase, false);
+                    autoPhase = 8;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M6 phase7: sightline solid wall built ({} blocks)",
+                            solidWall);
+                }
+            }
+            case 8 -> {
+                if (autoTicks - autoPhaseTick >= 25) {
+                    grabScreenshot(minecraft, "m6-sightline-solid.png");
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M6 sightline-solid: culling={} shapes={} culled={} prot={} incomplete={} rays={} scan={}us",
+                            SightlineScanner.get().isCulling(), SightlineScanner.get().shapeCount(),
+                            SightlineScanner.get().culledCount(), SightlineScanner.get().protectedCount(),
+                            SightlineScanner.get().incompleteShapes(), SightlineScanner.get().arrivedRays(),
+                            SightlineScanner.get().lastScanMicros());
+                    BlockPos archBase = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, archBase);
+                    int archBlocks = buildSightlineWall(minecraft, archBase, true);
+                    SightlineScanner.get().invalidate();
+                    autoPhase = 9;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M6 phase8: sightline arch built ({} blocks)", archBlocks);
+                }
+            }
+            case 9 -> {
+                if (autoTicks - autoPhaseTick >= 25) {
+                    grabScreenshot(minecraft, "m6-sightline-arch.png");
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M6 sightline-arch: culling={} shapes={} culled={} prot={} rays={}",
+                            SightlineScanner.get().isCulling(), SightlineScanner.get().shapeCount(),
+                            SightlineScanner.get().culledCount(), SightlineScanner.get().protectedCount(),
+                            SightlineScanner.get().arrivedRays());
+                    Config.CULLING_SIGHTLINE_ENABLED.set(false);
+                    SightlineScanner.get().reset();
+                    BlockPos hallBase = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, hallBase);
+                    int hallBlocks = buildDoorwayHall(minecraft, hallBase);
+                    RoomScanner.get().invalidate();
+                    autoPhase = 10;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M6 phase9: doorway hall built ({} blocks)", hallBlocks);
+                }
+            }
+            case 10 -> {
+                if (autoTicks - autoPhaseTick >= 45) {
+                    grabScreenshot(minecraft, "m6-room-doorway.png");
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M6 room-doorway: type={} columns={} doors={} roof={} wall={}",
+                            RoomScanner.get().type(), RoomScanner.get().columnCount(),
+                            RoomScanner.get().doorwayCount(), RoomScanner.get().roofColumnCount(),
+                            RoomScanner.get().wallColumnCount());
                     Config.CULLING_BLOCK_LEVEL.set(true);
                     Config.CULLING_SECTION_APPROXIMATION.set(true);
                     Config.CULLING_SHAPE_ENABLED.set(true);
+                    Config.CULLING_SIGHTLINE_ENABLED.set(true);
                     BlockCuller.invalidate();
                     SectionCuller.invalidate();
+                    SightlineScanner.get().reset();
                     minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
-                    autoPhase = 8;
+                    autoPhase = 11;
                     ModularPerspective.LOGGER.info("[auto] M6 verification finished");
                 }
             }
@@ -844,6 +911,72 @@ public final class ModularPerspectiveClient {
                     minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
                     count++;
                 }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 在相机与玩家之间搭 9×6×2 石墙（仅客户端方块），用于 SIGHTLINE tier 验收。
+     *
+     * <p>{@code arch=true} 时挖掉 dx -2..2、dy 2..5 的开口：射线从相机到玩家必穿过这面墙，
+     * 实心墙应被判“挡住大量射线”而整块剔除；拱墙上射线全部从开口通过，形状不应被剔除。
+     *
+     * @return 放置的方块数
+     */
+    private static int buildSightlineWall(Minecraft minecraft, BlockPos base, boolean arch) {
+        if (minecraft.level == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dy = 0; dy <= 5; dy++) {
+                for (int dz = -4; dz <= -3; dz++) {
+                    if (arch && dx >= -2 && dx <= 2 && dy >= 2 && dy <= 5) {
+                        continue;
+                    }
+                    // BUILT occluder class: keeps the shape bounded so the judge can cull it wholesale,
+                    // unlike terrain (which falls back to the hit-voxel silhouette).
+                    minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE_BRICKS.defaultBlockState(), 3);
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 搭一个带门洞的 9×5×3 大厅（周墙 dy0..2、天花板 dy3、x=+1 处隔墙留 dz -1..0、dy 1..2 的门洞），
+     * 玩家站在 x=0 主间。用于房间扫描/门洞计数验收：flood 会穿过门洞把两个房间合成一个 footprint。
+     *
+     * @return 放置的方块数
+     */
+    private static int buildDoorwayHall(Minecraft minecraft, BlockPos base) {
+        if (minecraft.level == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                boolean perimeter = Math.abs(dx) == 4 || Math.abs(dz) == 2;
+                if (perimeter) {
+                    for (int dy = 0; dy <= 2; dy++) {
+                        minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
+                        count++;
+                    }
+                }
+                minecraft.level.setBlock(base.offset(dx, 3, dz), Blocks.STONE.defaultBlockState(), 3);
+                count++;
+            }
+        }
+        for (int dz = -2; dz <= 2; dz++) {
+            for (int dy = 0; dy <= 2; dy++) {
+                boolean doorway = dz >= -1 && dz <= 0 && dy >= 1 && dy <= 2;
+                if (doorway) {
+                    continue;
+                }
+                minecraft.level.setBlock(base.offset(1, dy, dz), Blocks.STONE.defaultBlockState(), 3);
+                count++;
             }
         }
         return count;

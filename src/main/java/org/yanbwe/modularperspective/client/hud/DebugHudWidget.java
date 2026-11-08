@@ -15,6 +15,7 @@ import org.yanbwe.modularperspective.client.camera.ClientPerspective;
 import org.yanbwe.modularperspective.client.cull.BlockCuller;
 import org.yanbwe.modularperspective.client.cull.RoomScanner;
 import org.yanbwe.modularperspective.client.cull.SectionCuller;
+import org.yanbwe.modularperspective.client.cull.SightlineScanner;
 
 /**
  * 调试覆盖层（docs/design.md §10.2、§16 M4）：显示相机/仲裁/策略状态与剔除统计占位。
@@ -24,7 +25,7 @@ import org.yanbwe.modularperspective.client.cull.SectionCuller;
  */
 public final class DebugHudWidget implements HudWidget {
     private static final int WIDTH = 300;
-    private static final int HEIGHT = 104;
+    private static final int HEIGHT = 132;
     private static final int BACKGROUND = 0xB0000000;
     private static final int BORDER = 0xFF6A6A6A;
     private static final int LINE_HEIGHT = 11;
@@ -115,7 +116,13 @@ public final class DebugHudWidget implements HudWidget {
                     + " scan=" + SectionCuller.lastScanMicros() + "us");
             lines.add("filter=" + SectionCuller.lastFilterMicros() + "us/" + SectionCuller.maxFilterMicros() + "us");
         }
-        lines.add("room: " + (RoomScanner.get().isIndoor() ? "indoor" : "outdoor") + " roof=" + RoomScanner.get().roofColumnCount() + " scan=" + RoomScanner.get().lastScanMicros() + "us");
+        lines.add("room: " + (RoomScanner.get().isIndoor() ? "indoor" : "outdoor") + " roof=" + RoomScanner.get().roofColumnCount()
+                + " doors=" + RoomScanner.get().doorwayCount() + " scan=" + RoomScanner.get().lastScanMicros() + "us");
+        lines.add("sightline: " + (Config.CULLING_SIGHTLINE_ENABLED.get() ? "on" : "off")
+                + " shapes=" + SightlineScanner.get().shapeCount()
+                + " culled=" + SightlineScanner.get().culledCount()
+                + " prot=" + SightlineScanner.get().protectedCount()
+                + " scan=" + SightlineScanner.get().lastScanMicros() + "us");
         lines.add("HUD: " + ClientHud.widgetCount() + " widget(s)  [点击左上胶囊切换本层]");
         return lines;
     }
