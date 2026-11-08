@@ -86,3 +86,5 @@ src/main/java/org/yanbwe/modularperspective/
   mixin/                           相机/渲染/输入注入点
 src/test/java/org/yanbwe/modularperspective/   纯逻辑单测（JUnit 5）
 ```
+
+幽灵现在按原型屏幕空间曲线渐隐（`ghostClearScreen`/`ghostOpaqueScreen`/`ghostMaxAlpha`），不再有蓝色线框；默认策略为原型主路径（视线轮廓 + 房间扫描），`sightlineVolume` 默认关闭可手动开；`sectionApproximation` 默认关闭（旧“整段消失”的大块剔除需要显式开启）。

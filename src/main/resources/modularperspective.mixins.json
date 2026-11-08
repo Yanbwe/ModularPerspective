@@ -8,6 +8,7 @@
     "GameRendererMixin",
     "KeyboardInputMixin",
     "LevelRendererMixin",
+    "ModelBlockRendererMixin",
     "MouseHandlerMixin",
     "MouseHandlerAccessor",
     "MinecraftAccessor",

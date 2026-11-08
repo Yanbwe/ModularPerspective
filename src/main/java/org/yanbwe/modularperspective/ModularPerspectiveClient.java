@@ -566,8 +566,16 @@ public final class ModularPerspectiveClient {
                 // 验收期间窗口可能失焦：关掉失焦自动暂停，避免服务器停 tick 导致方块更新不同步。
                 autoSavedPauseOnLostFocus = minecraft.options.pauseOnLostFocus;
                 minecraft.options.pauseOnLostFocus = false;
+                Config.CULLING_ENABLED.set(true);
+                Config.CULLING_BLOCK_LEVEL.set(true);
+                Config.CULLING_SECTION_APPROXIMATION.set(false);
+                Config.CULLING_SHAPE_ENABLED.set(false);
+                Config.CULLING_SIGHTLINE_ENABLED.set(false);
+                Config.CULLING_VOLUME.set(false);
+                BlockCuller.invalidate();
+                SectionCuller.invalidate();
                 runServerCommand(minecraft, "gamemode creative @s");
-                runServerCommand(minecraft, "tp @s 290 ~ 290");
+                runServerCommand(minecraft, "tp @s 290 ~ 290 0 0");
                 autoPhase = 1;
                 autoPhaseTick = autoTicks;
                 ModularPerspective.LOGGER.info("[auto] M5 phase0: scene setup near section boundary");
@@ -658,8 +666,16 @@ public final class ModularPerspectiveClient {
                 CursorController.setUnlocked(true);
                 autoSavedPauseOnLostFocus = minecraft.options.pauseOnLostFocus;
                 minecraft.options.pauseOnLostFocus = false;
+                Config.CULLING_ENABLED.set(true);
+                Config.CULLING_BLOCK_LEVEL.set(true);
+                Config.CULLING_SECTION_APPROXIMATION.set(false);
+                Config.CULLING_SHAPE_ENABLED.set(false);
+                Config.CULLING_SIGHTLINE_ENABLED.set(false);
+                Config.CULLING_VOLUME.set(false);
+                BlockCuller.invalidate();
+                SectionCuller.invalidate();
                 runServerCommand(minecraft, "gamemode creative @s");
-                runServerCommand(minecraft, "tp @s 290 ~ 290");
+                runServerCommand(minecraft, "tp @s 290 ~ 290 0 0");
                 autoPhase = 1;
                 autoPhaseTick = autoTicks;
                 ModularPerspective.LOGGER.info("[auto] M6 phase0: setup at section boundary");
@@ -782,6 +798,11 @@ public final class ModularPerspectiveClient {
                             SightlineScanner.get().culledCount(), SightlineScanner.get().protectedCount(),
                             SightlineScanner.get().incompleteShapes(), SightlineScanner.get().arrivedRays(),
                             SightlineScanner.get().lastScanMicros());
+                    ModularPerspective.LOGGER.info(
+                            "[auto] M6 config: enabled={} block={} shape={} sightline={} volume={} topDown={}",
+                            Config.CULLING_ENABLED.get(), Config.CULLING_BLOCK_LEVEL.get(),
+                            Config.CULLING_SHAPE_ENABLED.get(), Config.CULLING_SIGHTLINE_ENABLED.get(),
+                            Config.CULLING_VOLUME.get(), ClientPerspective.isTopDown());
                     BlockPos archBase = minecraft.player.blockPosition();
                     clearSceneArea(minecraft, archBase);
                     int archBlocks = buildSightlineWall(minecraft, archBase, true);

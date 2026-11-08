@@ -81,6 +81,7 @@ public final class SectionCuller {
         Level level = minecraft.level;
         if (!Config.CULLING_ENABLED.get() || Config.CULLING_BLOCK_LEVEL.get()
                 || !Config.CULLING_SECTION_APPROXIMATION.get()
+                || Config.CULLING_VOLUME.get()
                 || level == null || minecraft.player == null || !ClientPerspective.isTopDown()) {
             if (culling || hiddenCount != 0 || raysCast != 0) {
                 HIDDEN.clear();
