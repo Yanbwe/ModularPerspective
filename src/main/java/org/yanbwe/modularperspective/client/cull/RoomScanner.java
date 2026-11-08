@@ -61,6 +61,10 @@ public final class RoomScanner {
     private static final int MAX_HOLE_FILL_PASSES = 32;
     /** Flood visit budget per scan. */
     private static final int MAX_FLOOD_VISITS = 16000;
+    /** 单次扫描硬预算；超时保留旧快照并下一 tick 重试（原模组 worker/预算的同步近似）。 */
+    private static final long SCAN_BUDGET_NANOS = 3_000_000L;
+    /** How far above the head we look for a ceiling before running the full flood. */
+    private static final int CEILING_PROBE = 8;
     /** Cull-span expansion cap for ghost rendering / debug dumps. */
     private static final int MAX_EXPANDED_BLOCKS = 8192;
 
@@ -103,6 +107,8 @@ public final class RoomScanner {
     private volatile Snapshot snapshot;
     private volatile Type type = Type.OUTDOOR;
     private volatile String lastResult = "never run";
+    private volatile long lastScanNanos;
+    private volatile long maxScanNanos;
     private int openSkyDiag;
     private boolean dirty = true;
     private long lastScanTick = Long.MIN_VALUE;
@@ -120,6 +126,16 @@ public final class RoomScanner {
 
     public Type type() {
         return this.type;
+    }
+
+    /** Microseconds spent in the last completed scan. */
+    public long lastScanMicros() {
+        return this.lastScanNanos / 1000L;
+    }
+
+    /** Worst completed scan time since startup, in microseconds. */
+    public long maxScanMicros() {
+        return this.maxScanNanos / 1000L;
     }
 
     public String lastResult() {
@@ -241,6 +257,7 @@ public final class RoomScanner {
         this.snapshot = null;
         this.type = Type.OUTDOOR;
         this.lastResult = "reset";
+        this.lastScanNanos = 0L;
         this.dirty = true;
         this.lastScanTick = Long.MIN_VALUE;
         this.lastScanPos = null;
@@ -283,7 +300,12 @@ public final class RoomScanner {
     // ------------------------------------------------------------------ scanning
 
     private void scan(Level level, BlockPos playerPos) {
+        long scanStart = System.nanoTime();
         BlockPos start = playerPos.above();
+        if (!hasCeilingNearby(level, start)) {
+            bailOut("open sky above player", 0);
+            return;
+        }
         int yMin = start.getY() - MAX_VERTICAL_DOWN;
         int yMax = start.getY() + MAX_VERTICAL_UP;
 
@@ -299,6 +321,10 @@ public final class RoomScanner {
         while (!queue.isEmpty() && visits < MAX_FLOOD_VISITS) {
             BlockPos current = queue.pollFirst();
             visits++;
+            if ((visits & 0x3F) == 0 && System.nanoTime() - scanStart > SCAN_BUDGET_NANOS) {
+                bailOut("flood over budget after " + visits + " visits - probably outdoors", 0);
+                return;
+            }
             long xz = packXZ(current.getX(), current.getZ());
             if (roomColumns.add(xz)) {
                 columnList.add(xz);
@@ -331,7 +357,13 @@ public final class RoomScanner {
         }
 
 
-        org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] flood columns={} visits={}", columnList.size(), visits);
+        if (Config.DEBUG_OVERLAY.get()) {
+            org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] flood columns={} visits={}", columnList.size(), visits);
+        }
+        if (visits >= MAX_FLOOD_VISITS) {
+            bailOut("flood visit budget exhausted (probably outdoors)", 0);
+            return;
+        }
         if (columnList.isEmpty()) {
             bailOut("player is under open sky - not in a room", 0);
             return;
@@ -342,6 +374,10 @@ public final class RoomScanner {
         it.unimi.dsi.fastutil.longs.Long2LongMap roofs = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap(columnList.size());
         int openSky = 0;
         for (int i = 0; i < columnList.size(); i++) {
+            if ((i & 0x1F) == 0 && System.nanoTime() - scanStart > SCAN_BUDGET_NANOS) {
+                abortBudget("roof solve", scanStart);
+                return;
+            }
             long xz = columnList.getLong(i);
             int x = unpackX(xz);
             int z = unpackZ(xz);
@@ -379,7 +415,9 @@ public final class RoomScanner {
             roofs.put(xz, packRoof(roofBase, roofTop));
         }
 
-        org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] roof solve columns={} openSky={}", columnList.size(), openSky);
+        if (Config.DEBUG_OVERLAY.get()) {
+            org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] roof solve columns={} openSky={}", columnList.size(), openSky);
+        }
         if (openSky > columnList.size() * OPEN_SKY_BAIL_RATIO) {
             bailOut("player is under open sky (" + openSky + "/" + columnList.size() + " columns) - not in a room", openSky);
             return;
@@ -387,6 +425,10 @@ public final class RoomScanner {
 
         // Stage 3: close the footprint (dilate over walls, fill enclosed holes).
         it.unimi.dsi.fastutil.longs.Long2LongMap closed = closeFootprint(level, roofs, openSky);
+        if (System.nanoTime() - scanStart > SCAN_BUDGET_NANOS) {
+            abortBudget("footprint close", scanStart);
+            return;
+        }
         if (closed == null) {
             bailOut("footprint close failed", openSky);
             return;
@@ -415,9 +457,33 @@ public final class RoomScanner {
 
         this.snapshot = new Snapshot(closed, hash, roofColumns, wallColumns, openSky);
         this.type = Type.INDOOR;
-        org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] published columns={} roof={} wall={} openSky={}", closed.size(), roofColumns, wallColumns, openSky);
+        long elapsed = System.nanoTime() - scanStart;
+        this.lastScanNanos = elapsed;
+        this.maxScanNanos = Math.max(this.maxScanNanos, elapsed);
+        org.yanbwe.modularperspective.ModularPerspective.LOGGER.info("[room] published columns={} roof={} wall={} openSky={} took={}us", closed.size(), roofColumns, wallColumns, openSky, elapsed / 1000L);
         this.lastResult = "INDOOR columns=" + closed.size() + " roof=" + roofColumns + " wall=" + wallColumns
                 + " openSky=" + openSky;
+    }
+
+    private static boolean hasCeilingNearby(Level level, BlockPos start) {
+        int baseY = start.getY();
+        for (int probeY = baseY; probeY <= baseY + CEILING_PROBE; probeY++) {
+            BlockPos probe = new BlockPos(start.getX(), probeY, start.getZ());
+            if (!level.isLoaded(probe)) {
+                return false;
+            }
+            if (level.getBlockState(probe).isSolidRender(level, probe)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A scan that runs over budget keeps the previous snapshot and retries next tick. */
+    private void abortBudget(String stage, long scanStart) {
+        long micros = (System.nanoTime() - scanStart) / 1000L;
+        this.lastResult = "scan budget exceeded in " + stage + " (" + micros + "us)";
+        this.dirty = false;
     }
 
     private void bailOut(String reason, int openSky) {

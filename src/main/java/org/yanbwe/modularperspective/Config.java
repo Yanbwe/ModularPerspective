@@ -25,6 +25,7 @@ public final class Config {
     public static final ModConfigSpec.BooleanValue CULLING_SECTION_APPROXIMATION;
     public static final ModConfigSpec.BooleanValue CULLING_BLOCK_LEVEL;
     public static final ModConfigSpec.BooleanValue CULLING_GHOST;
+    public static final ModConfigSpec.BooleanValue CULLING_GHOST_FILL;
     public static final ModConfigSpec.BooleanValue DEBUG_OVERLAY;
 
     static {
@@ -39,6 +40,9 @@ public final class Config {
         CULLING_GHOST = COMMON_BUILDER
                 .comment("v0.2 方块级剔除时给被剔除方块画半透明线框（幽灵轮廓），避免“墙被挖洞”看起来像渲染错误")
                 .define("ghostOutline", true);
+        CULLING_GHOST_FILL = COMMON_BUILDER
+                .comment("v0.3 幽灵方块填充：在半透明线框之外再给被剔除方块画一层半透明青色体积（debugQuads，按面剔除内部面），可在 culling.ghostFill 关闭")
+                .define("ghostFill", true);
         COMMON_BUILDER.pop();
 
         COMMON_BUILDER.comment("调试输出").push("debug");
