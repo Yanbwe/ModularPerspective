@@ -58,12 +58,7 @@ HudRegistry.register(ResourceLocation.fromNamespaceAndPath("examplemod", "quest_
 
 ## 剔除
 
-v0.4 起默认 **视线体积剔除**（`culling.sightlineVolume=true`）：以“相机 → 角色眼睛”的连线为轴，内半径 `volumeInnerRadius=3` 以内完全透明、`volumeOuterRadius=8` 以外不再处理，中间按“先快后缓”的曲线提升幽灵不透明度；连线首尾做平滑收口。被剔除方块以方块贴图的半透明体积显示（无边框、跳过邻面）。旧的 section/方块/锥形/视线四层保留在配置中（默认关闭）。
-
-历史 v0.2 策略（`culling.blockLevel`，默认已关闭）：：沿相机→玩家 9 条视线每 0.25 格采样，命中实心方块后按 6 邻接 **BFS 把整个连通形状**从区块 mesh 中剔除（单形状上限 1024 块、全局 8192、只处理相机 48 格内、跳过玩家脚下及以下与玩家 section）；连通形状超过 1024 块（山体/屋顶）时退回“命中点周围 27 格视线隧道”，避免挖掉大片地形。重建只把状态变化的 section 按 16 个/tick 预算标脏（`RenderChunkRegionMixin` 把被剔除方块返回空气，只影响渲染，不改世界/碰撞）。被剔除方块会画 0.35 透明度的青色线框（`culling.ghostOutline`，默认开）。`culling.blockLevel=false` 退回 v0.1 section 级近似（每 2 tick 射线命中即隐藏整段 16³ section，`renderSectionLayer` 过滤）；`culling.enabled=false` 两者都关。开发期验收：五场景 section 级扫描最大 83us/过滤最大 28us（预算 2ms/0.2ms）；方块级 10×16 石墙 672 块被整体隐藏、关闭后完整恢复。房间扫描已按原模组语义重写（`RoomScanner` 4 阶段：泛洪记录 topAir → 每列求 roofBase/roofTop（跨楼层，负 y 用 `Integer.MIN_VALUE` 哨兵）→ 2D footprint dilate + 封闭空洞填充 → 不可变 Snapshot；`RenderChunkRegionMixin` 中先于方块级剔除，roofBase..roofTop 返回空气、roofTop 以上 KEEP 保护）；验收：5×5×3 房间 `INDOOR roof=9 wall=16 openSky=0`、天花板整段剔除并画线框，室外 `blocks=0`，小墙 672 块不回归。幽灵轮廓已升级为“半透明方块贴图体积”（无边框，`culling.ghostFill=false` 可关闭，按距离渐变透明度、跳过内部面、上限 4096）；房间扫描加了 3ms 扫描硬预算（超时保留旧快照、下轮重试）与“头顶 8 格无实心直接判室外”的快速路径（室外不再每秒跑满 16000 次泛洪），调试 HUD 显示 `scan=...us`。房间扫描已移到独立 worker 线程（客户端线程只做 section 快照捕获与结果换入，单次捕获约 38us、总计约 1ms，仍有 3ms 预算）。形状/视线剔除首片（SHAPE tier）已按 `GenericCuller3` 语义接线：config `culling.shape`（默认开）、`culling.shapeRadius`=6.0、`culling.shapeConeHalfAngle`=45°，`ShapeCuller` 按“脚部+1 格以下不剔/相机 5 格内必剔/到相机-玩家轴线垂距 ≤ min(投影×tan 半角, 半径)”判定，`BlockCuller#carveCone` 遍历包围盒并跳过门/梯子/墙挂方块/刷怪箱/宝库与房间层 KEEP；验收 9×5×2 石墙 90 块中 86 块被剔除、玩家可见，关闭后完整恢复；另已补三项 parity（详见 docs §16）：完整 SightlineScanner 视线轮廓 tier（27 射线 + TREE/BUILT/TERRAIN 连通形状 + rayMask 评分，sightline-solid 108 块整墙剔除、拱墙 0 误剔）；门洞计数（`DoorwayCounter` 墙线 run 语义，2 宽门洞 doors=2、密封房间 0）；贴图幽灵（方块模型 + 半透明方块图集、全亮蓝图风格，覆盖方块/视线/房间三类，上限 4096）。仍留：房间图/门洞语义扩展（原型本身无房间图，合并由 flood 天然完成）、Sodium/光影兼容暂缓。
-
-对视线体积内的方块：`volumeInnerRadius` 内完全透明、到 `volumeOuterRadius` 达到 `volumeMaxAlpha`；房间屋顶剔除限制在 `roomMaxDistance` 内；树木（原木/树叶）也参与遮挡剔除。正交俯视下光标选块会跳过被剔除方块，不会误挖角色背后的半透明方块；角色头部会朝光标命中的方块方向转动（退出俯视即恢复）。
-
+v0.5 起剔除系统整体换成原型 `DungeonsPerspective` 的语义：区块网格构建时，被剔除方块直接按空气参与（`RenderChunkRegionMixin` 返回 `Blocks.AIR`），方块模型烘焙时也把被剔除方块模型替换为空 quad（`ModelEvent.ModifyBakingResult` + `BakedModelWrapper`）。两级判定：先按房间扫描（`RoomScanner`，屋顶/墙壁/门洞计数；判定偏保守，任一开阔天空列即室外），再按视线轮廓扫描（`SightlineScanner`，27 条相机→玩家射线、按 `OccluderClass` 把连通遮挡体分组并按“挡住多少射线”整块剔除或保护；树叶/原木也算遮挡体）。被剔除方块以方块贴图的半透明体积显示：角色投影点周围完全透明，随屏幕距离增加逐渐显形（`ghostClearScreen=0.20`、`ghostOpaqueScreen=1.40`、`ghostMaxAlpha=0.90`），无边框、跳过内部面。旧 section 级/方块级/锥形/视线体积策略已删除。相关配置：`culling.enabled`、`culling.sightline`、`culling.sightlineOccludeThreshold`、`culling.ghostOutline`、`ghostClearScreen`、`ghostOpaqueScreen`、`ghostMaxAlpha`。
 ## 目录
 
 ```
@@ -74,7 +69,7 @@ src/main/java/org/yanbwe/modularperspective/
   api/camera/                      公开类型：通道、指令、目标、快照、锁、强制级别、结束原因、缓动、投影、策略
   client/camera/                   相机栈与客户端预设（CameraStack / ClientPerspective）
   client/input/                    伪解锁光标状态机（CursorController）
-  client/cull/                     剔除：BlockCuller（方块级）/ SectionCuller（section 级）/ RoomScanner（室内外）/ CullingGhostRenderer（线框+半透明填充）
+  client/cull/                     剔除：TerrainCulling（门面）/ RoomScanner（房间）/ SightlineScanner（视线轮廓）/ CullingModels（模型烘焙剔除）/ CullingGhostRenderer（屏幕空间半透明幽灵）
   api/hud/                         公开 HUD 类型（Anchor/HudWidget/HudContext/HudLayout/HudRegistry）
   client/hud/                      HUD 宿主与内置控件（ClientHud/CameraStatusWidget/DebugHudWidget/ExampleBadgeWidget/WorldAnchorWidget）
   client/PerspectiveClientNetwork  客户端 payload 接收（快照 → CameraStack）

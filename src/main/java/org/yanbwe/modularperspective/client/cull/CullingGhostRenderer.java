@@ -62,7 +62,7 @@ public final class CullingGhostRenderer {
         if (event.getStage() != RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) {
             return;
         }
-        if (!Config.CULLING_GHOST.get() || !Config.CULLING_GHOST_FILL.get()) {
+        if (!Config.CULLING_GHOST.get()) {
             return;
         }
         Minecraft minecraft = Minecraft.getInstance();
@@ -70,11 +70,9 @@ public final class CullingGhostRenderer {
         if (level == null || minecraft.player == null) {
             return;
         }
-        boolean volumeCulling = VolumeCuller.get().isActive();
         boolean roomCulling = RoomScanner.get().isIndoor();
-        boolean legacyCulling = (BlockCuller.isCulling() && !BlockCuller.culledBlocks().isEmpty())
-                || (SightlineScanner.get().isCulling() && SightlineScanner.get().culledCount() > 0);
-        if (!volumeCulling && !roomCulling && !legacyCulling) {
+        boolean sightlineCulling = SightlineScanner.get().isCulling() && SightlineScanner.get().culledCount() > 0;
+        if (!roomCulling && !sightlineCulling) {
             return;
         }
 
@@ -82,30 +80,12 @@ public final class CullingGhostRenderer {
         double maxDistanceSq = MAX_RENDER_DISTANCE * MAX_RENDER_DISTANCE;
 
         List<BlockPos> boxes = new ArrayList<>();
-        if (volumeCulling) {
-            VolumeCuller.get().forEachCulledBlock(pos -> {
+        if (sightlineCulling) {
+            SightlineScanner.get().forEachCulledBlock(pos -> {
                 if (boxes.size() < MAX_BOXES && inRange(pos, cameraPos, maxDistanceSq)) {
                     boxes.add(pos.immutable());
                 }
             });
-        }
-        if (legacyCulling && boxes.size() < MAX_BOXES) {
-            if (BlockCuller.isCulling()) {
-                LongIterator iterator = BlockCuller.culledBlocks().iterator();
-                while (iterator.hasNext() && boxes.size() < MAX_BOXES) {
-                    BlockPos pos = BlockPos.of(iterator.nextLong());
-                    if (inRange(pos, cameraPos, maxDistanceSq)) {
-                        boxes.add(pos);
-                    }
-                }
-            }
-            if (boxes.size() < MAX_BOXES) {
-                SightlineScanner.get().forEachCulledBlock(pos -> {
-                    if (boxes.size() < MAX_BOXES && inRange(pos, cameraPos, maxDistanceSq)) {
-                        boxes.add(pos.immutable());
-                    }
-                });
-            }
         }
         if (roomCulling && boxes.size() < MAX_BOXES) {
             RoomScanner.get().forEachCulledBlock(pos -> {
@@ -113,8 +93,7 @@ public final class CullingGhostRenderer {
                     boxes.add(new BlockPos(pos.getX(), pos.getY(), pos.getZ()));
                 }
             });
-        }
-        if (boxes.isEmpty()) {
+        }        if (boxes.isEmpty()) {
             return;
         }
 
@@ -158,7 +137,7 @@ public final class CullingGhostRenderer {
                     if (boxSet.contains(neighbour.asLong())) {
                         continue;
                     }
-                    if (CullingOccluders.isOccluder(level, neighbour)) {
+                    if (isOccluder(level, neighbour)) {
                         continue;
                     }
                     for (BakedQuad quad : model.getQuads(state, direction, random)) {
@@ -290,6 +269,11 @@ public final class CullingGhostRenderer {
         return maxAlpha * t * t * (3.0F - 2.0F * t);
     }
 
+    /** 实心方块或树类遮挡体都算“原本不可见/不可穿”的邻居，跳过对应面。 */
+    private static boolean isOccluder(Level level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        return state.isSolidRender(level, pos) || OccluderClass.classify(state) == OccluderClass.TREE;
+    }
     private static boolean inRange(BlockPos pos, Vec3 cameraPos, double maxDistanceSq) {
         double dx = pos.getX() + 0.5D - cameraPos.x;
         double dy = pos.getY() + 0.5D - cameraPos.y;

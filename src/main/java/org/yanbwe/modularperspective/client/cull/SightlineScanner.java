@@ -66,7 +66,7 @@ public final class SightlineScanner {
     private static final int RAY_HIT = 1;
     private static final int RAY_BUDGET = 2;
     private static final int MAX_SILHOUETTE_BLOCKS = 256;
-    private static final long SCAN_BUDGET_NANOS = 1_500_000L;
+    private static final long SCAN_BUDGET_NANOS = 4_000_000L;
 
     /** 26-neighbour offsets, used for tree/canopy shapes. */
     private static final int[] DIAGONAL_DX = new int[26];
@@ -116,6 +116,10 @@ public final class SightlineScanner {
 
     // ------------------------------------------------------------------ read side
 
+    /** 整数坐标版本（TerrainCulling 热路径用）。 */
+    public boolean shouldCull(int x, int y, int z) {
+        return isCulled(new BlockPos(x, y, z));
+    }
     public boolean isCulled(BlockPos pos) {
         return active && !culled.isEmpty() && culled.contains(pos.asLong());
     }
@@ -193,8 +197,7 @@ public final class SightlineScanner {
 
     public void tick(Minecraft minecraft) {
         Level level = minecraft.level;
-        boolean enabled = Config.CULLING_ENABLED.get() && Config.CULLING_SIGHTLINE_ENABLED.get()
-                && !Config.CULLING_VOLUME.get();
+        boolean enabled = Config.CULLING_ENABLED.get() && Config.CULLING_SIGHTLINE_ENABLED.get();
         if (!enabled || level == null || minecraft.player == null || !ClientPerspective.isTopDown()) {
             if (active || !culled.isEmpty() || !protectedBlocks.isEmpty()) {
                 reset();
@@ -289,6 +292,12 @@ public final class SightlineScanner {
                 + " incomplete=" + incompleteShapes + " rays=" + arrivedRays + "/" + totalRays;
     }
 
+    /** 实心方块或树木类（树叶/原木）都视为可遮挡；与原型 SightlineScanner 一致。 */
+    private static boolean isOccluder(Level level, BlockPos pos) {
+        BlockState state = level.getBlockState(pos);
+        return state.isSolidRender(level, pos) || OccluderClass.classify(state) == OccluderClass.TREE;
+    }
+
     /** @return {@link #RAY_BUDGET} when the budget ran out inside the ray, otherwise {@link #RAY_HIT} or {@link #RAY_MISS}. */
     private int castRay(Level level, Vec3 from, Vec3 to, int rayIndex,
             Long2IntOpenHashMap hitMasks, long startNanos) {
@@ -316,7 +325,7 @@ public final class SightlineScanner {
                 break;
             }
             BlockState state = level.getBlockState(pos);
-            if (state.isSolidRender(level, pos)) {
+            if (isOccluder(level, pos)) {
                 hitMasks.merge(key, 1 << rayIndex, (first, second) -> first | second);
                 hit = true;
             }
@@ -422,7 +431,7 @@ public final class SightlineScanner {
                             continue;
                         }
                         BlockState neighbourState = level.getBlockState(neighbour);
-                        if (neighbourState.isSolidRender(level, neighbour)
+                        if (isOccluder(level, neighbour)
                                 && OccluderClass.classify(neighbourState) == hitClass) {
                             nextCulled.add(neighbour.asLong());
                         }
@@ -453,7 +462,7 @@ public final class SightlineScanner {
             return;
         }
         BlockState state = level.getBlockState(neighbour);
-        if (!state.isSolidRender(level, neighbour) || OccluderClass.classify(state) != occluderClass) {
+        if (!isOccluder(level, neighbour) || OccluderClass.classify(state) != occluderClass) {
             return;
         }
         queue.add(neighbour);

@@ -12,9 +12,7 @@ import org.yanbwe.modularperspective.api.hud.HudContext;
 import org.yanbwe.modularperspective.api.hud.HudLayout;
 import org.yanbwe.modularperspective.api.hud.HudWidget;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
-import org.yanbwe.modularperspective.client.cull.BlockCuller;
 import org.yanbwe.modularperspective.client.cull.RoomScanner;
-import org.yanbwe.modularperspective.client.cull.SectionCuller;
 import org.yanbwe.modularperspective.client.cull.SightlineScanner;
 
 /**
@@ -106,16 +104,7 @@ public final class DebugHudWidget implements HudWidget {
         lines.add(String.format("policy req=%s sug=%s ortho=%s max=%d",
                 policy.allowRequire(), policy.allowSuggest(), policy.allowOrthographic(),
                 policy.maxDirectives()));
-        if (Config.CULLING_BLOCK_LEVEL.get()) {
-            lines.add("cull: block " + (BlockCuller.isCulling() ? "on" : "off")
-                    + " blocks=" + BlockCuller.culledCount() + " r=" + BlockCuller.raysCast()
-                    + " dirty=" + BlockCuller.dirtyPending());
-        } else {
-            lines.add("cull: section " + (SectionCuller.isCulling() ? "on" : "off")
-                    + " h=" + SectionCuller.hiddenCount() + " r=" + SectionCuller.raysCast()
-                    + " scan=" + SectionCuller.lastScanMicros() + "us");
-            lines.add("filter=" + SectionCuller.lastFilterMicros() + "us/" + SectionCuller.maxFilterMicros() + "us");
-        }
+
         lines.add("room: " + (RoomScanner.get().isIndoor() ? "indoor" : "outdoor") + " roof=" + RoomScanner.get().roofColumnCount()
                 + " doors=" + RoomScanner.get().doorwayCount() + " scan=" + RoomScanner.get().lastScanMicros() + "us");
         lines.add("sightline: " + (Config.CULLING_SIGHTLINE_ENABLED.get() ? "on" : "off")

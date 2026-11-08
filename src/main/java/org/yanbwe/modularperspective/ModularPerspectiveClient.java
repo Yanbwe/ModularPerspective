@@ -27,12 +27,11 @@ import org.yanbwe.modularperspective.api.camera.ResolvedCameraState;
 import org.yanbwe.modularperspective.api.hud.HudRegistry;
 import org.yanbwe.modularperspective.client.PerspectiveClientNetwork;
 import org.yanbwe.modularperspective.client.camera.ClientPerspective;
-import org.yanbwe.modularperspective.client.cull.BlockCuller;
 import org.yanbwe.modularperspective.client.cull.CullingGhostRenderer;
+import org.yanbwe.modularperspective.client.cull.CullingModels;
+import org.yanbwe.modularperspective.client.cull.TerrainCulling;
 import org.yanbwe.modularperspective.client.cull.RoomScanner;
-import org.yanbwe.modularperspective.client.cull.SectionCuller;
 import org.yanbwe.modularperspective.client.cull.SightlineScanner;
-import org.yanbwe.modularperspective.client.cull.VolumeCuller;
 import org.yanbwe.modularperspective.client.hud.CameraStatusWidget;
 import org.yanbwe.modularperspective.client.hud.ClientHud;
 import org.yanbwe.modularperspective.client.hud.DebugHudWidget;
@@ -71,7 +70,6 @@ public final class ModularPerspectiveClient {
     private static final String AUTO_MARKER_M3 = "m3-auto.marker";
     private static final String AUTO_MARKER_PERSIST = "m3-persist.marker";
     private static final String AUTO_MARKER_M4 = "m4-auto.marker";
-    private static final String AUTO_MARKER_M5 = "m5-auto.marker";
     private static final String AUTO_MARKER_M6 = "m6-auto.marker";
     private static final int AUTO_ENABLE_AT = 40;
     private static final int AUTO_MOVE_AT = 50;
@@ -88,8 +86,8 @@ public final class ModularPerspectiveClient {
     private static boolean autoModeM3;
     private static boolean autoModePersist;
     private static boolean autoModeM4;
-    private static boolean autoModeM5;
     private static boolean autoModeM6;
+    private static BlockPos m6Base;
     private static boolean autoModeChecked;
     private static double autoMoveStartX;
     private static double autoMoveStartZ;
@@ -107,6 +105,7 @@ public final class ModularPerspectiveClient {
         modEventBus.addListener(ModularPerspectiveClient::onRegisterGuiLayers);
         modEventBus.addListener(ModularPerspectiveClient::onClientSetup);
         modEventBus.addListener(PerspectiveClientNetwork::register);
+        modEventBus.addListener(CullingModels::modifyModels);
 
         // 客户端配置界面（Mods 列表里点 Config 可编辑 §13 的客户端项）。
         modContainer.registerExtensionPoint(IConfigScreenFactory.class, ConfigurationScreen::new);
@@ -151,6 +150,8 @@ public final class ModularPerspectiveClient {
     }
 
     private static void onClientSetup(FMLClientSetupEvent event) {
+        // worker 线程会调用 TerrainCulling，这里在客户端线程把扫描器栈预热好（对齐原型 warmUp）。
+        TerrainCulling.warmUp();
         ModularPerspective.LOGGER.info("[{}] client setup complete", ModularPerspective.MODID);
     }
 
@@ -160,7 +161,7 @@ public final class ModularPerspectiveClient {
             ClientPerspective.reset();
             CursorController.reset();
             SightlineScanner.get().reset();
-            VolumeCuller.get().reset();
+            TerrainCulling.setEnabled(false);
             autoTicks = 0;
             return;
         }
@@ -174,13 +175,11 @@ public final class ModularPerspectiveClient {
         while (SNAP_ANGLE.consumeClick()) {
             ClientPerspective.snapAngles();
         }
+        TerrainCulling.setEnabled(Config.CULLING_ENABLED.get() && ClientPerspective.isTopDown());
         ClientPerspective.tick(minecraft);
         CursorController.tick(minecraft);
         RoomScanner.get().tick(minecraft);
         SightlineScanner.get().tick(minecraft);
-        VolumeCuller.tick(minecraft);
-        SectionCuller.tick(minecraft);
-        BlockCuller.tick(minecraft);
         runAutoVerification(minecraft);
     }
 
@@ -243,18 +242,15 @@ public final class ModularPerspectiveClient {
             autoModeM3 = new File(minecraft.gameDirectory, AUTO_MARKER_M3).isFile();
             autoModePersist = new File(minecraft.gameDirectory, AUTO_MARKER_PERSIST).isFile();
             autoModeM4 = new File(minecraft.gameDirectory, AUTO_MARKER_M4).isFile();
-            autoModeM5 = new File(minecraft.gameDirectory, AUTO_MARKER_M5).isFile();
             autoModeM6 = new File(minecraft.gameDirectory, AUTO_MARKER_M6).isFile();
-            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist || autoModeM4 || autoModeM5
-                    || autoModeM6) {
+            if (autoModeM1 || autoModeM2 || autoModeMove || autoModeM3 || autoModePersist || autoModeM4 || autoModeM6) {
                 ModularPerspective.LOGGER.info(
-                        "[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={} M4={} M5={} M6={}",
-                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist, autoModeM4, autoModeM5,
-                        autoModeM6);
+                        "[auto] verification mode: M1={} M2={} MOVE={} M3={} PERSIST={} M4={} M6={}",
+                        autoModeM1, autoModeM2, autoModeMove, autoModeM3, autoModePersist, autoModeM4, autoModeM6);
             }
         }
         if (!autoModeM1 && !autoModeM2 && !autoModeMove && !autoModeM3 && !autoModePersist && !autoModeM4
-                && !autoModeM5 && !autoModeM6) {
+                && !autoModeM6) {
             return;
         }
         autoTicks++;
@@ -262,10 +258,7 @@ public final class ModularPerspectiveClient {
             runM6Verification(minecraft);
             return;
         }
-        if (autoModeM5) {
-            runM5Verification(minecraft);
-            return;
-        }
+
         if (autoModeM4) {
             runM4Verification(minecraft);
             return;
@@ -555,101 +548,6 @@ public final class ModularPerspectiveClient {
      * 在相机与玩家之间搭不同尺寸的客户端石墙，做 5 个场景（平地 / 矮墙 / 高墙 / 宽高墙 / 剔除关），
      * 每个场景截图并输出 hidden/rays/scan/filter 耗时，用于 §16 M5 的可执行验收。
      */
-    private static void runM5Verification(Minecraft minecraft) {
-        if (autoTicks < AUTO_ENABLE_AT) {
-            return;
-        }
-        switch (autoPhase) {
-            case 0 -> {
-                ClientPerspective.setTopDown(true);
-                CursorController.setUnlocked(true);
-                // 验收期间窗口可能失焦：关掉失焦自动暂停，避免服务器停 tick 导致方块更新不同步。
-                autoSavedPauseOnLostFocus = minecraft.options.pauseOnLostFocus;
-                minecraft.options.pauseOnLostFocus = false;
-                Config.CULLING_ENABLED.set(true);
-                Config.CULLING_BLOCK_LEVEL.set(true);
-                Config.CULLING_SECTION_APPROXIMATION.set(false);
-                Config.CULLING_SHAPE_ENABLED.set(false);
-                Config.CULLING_SIGHTLINE_ENABLED.set(false);
-                Config.CULLING_VOLUME.set(false);
-                BlockCuller.invalidate();
-                SectionCuller.invalidate();
-                runServerCommand(minecraft, "gamemode creative @s");
-                runServerCommand(minecraft, "tp @s 290 ~ 290 0 0");
-                autoPhase = 1;
-                autoPhaseTick = autoTicks;
-                ModularPerspective.LOGGER.info("[auto] M5 phase0: scene setup near section boundary");
-            }
-            case 1 -> {
-                if (autoTicks - autoPhaseTick >= 20) {
-                    if (minecraft.player != null) {
-                        minecraft.player.setYRot(0.0F);
-                        minecraft.player.setXRot(0.0F);
-                    }
-                    BlockPos base = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, base);
-                    autoPhase = 2;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M5 scene1 (flat): base={}", base);
-                }
-            }
-            case 2 -> {
-                if (autoTicks - autoPhaseTick >= 15) {
-                    screenshotAndLog(minecraft, "m5-scene1.png", "flat");
-                    BlockPos base = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, base);
-                    buildWall(minecraft, base, 3, 8, 2);
-                    autoPhase = 3;
-                    autoPhaseTick = autoTicks;
-                }
-            }
-            case 3 -> {
-                if (autoTicks - autoPhaseTick >= 15) {
-                    screenshotAndLog(minecraft, "m5-scene2.png", "wall-3x8");
-                    BlockPos base = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, base);
-                    buildWall(minecraft, base, 3, 16, 2);
-                    autoPhase = 4;
-                    autoPhaseTick = autoTicks;
-                }
-            }
-            case 4 -> {
-                if (autoTicks - autoPhaseTick >= 15) {
-                    screenshotAndLog(minecraft, "m5-scene3.png", "wall-3x16");
-                    BlockPos base = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, base);
-                    buildWall(minecraft, base, 10, 16, 2);
-                    autoPhase = 5;
-                    autoPhaseTick = autoTicks;
-                }
-            }
-            case 5 -> {
-                if (autoTicks - autoPhaseTick >= 15) {
-                    screenshotAndLog(minecraft, "m5-scene4.png", "wall-10x16");
-                    Config.CULLING_ENABLED.set(false);
-                    SectionCuller.invalidate();
-                    autoPhase = 6;
-                    autoPhaseTick = autoTicks;
-                }
-            }
-            case 6 -> {
-                if (autoTicks - autoPhaseTick >= 15) {
-                    screenshotAndLog(minecraft, "m5-scene5.png", "culling-off");
-                    Config.CULLING_ENABLED.set(true);
-                    SectionCuller.invalidate();
-                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
-                    autoPhase = 7;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M5 verification finished");
-                }
-            }
-            default -> {
-
-
-                // 完成：不再动作。
-            }
-        }
-    }
 
     /**
      * M6 方块级剔除自动验收（marker {@code m6-auto.marker}，§11.2、§16 M6）：
@@ -657,216 +555,99 @@ public final class ModularPerspectiveClient {
      * 关闭 blockLevel 后墙恢复完整。
      */
     private static void runM6Verification(Minecraft minecraft) {
-        if (autoTicks < AUTO_ENABLE_AT) {
+        if (minecraft.player == null || minecraft.level == null) {
             return;
         }
+
         switch (autoPhase) {
             case 0 -> {
+                runServerCommand(minecraft, "gamemode creative");
+                runServerCommand(minecraft, "tp @s 290.5 ~ 290.5 0 0");
                 ClientPerspective.setTopDown(true);
                 CursorController.setUnlocked(true);
-                autoSavedPauseOnLostFocus = minecraft.options.pauseOnLostFocus;
-                minecraft.options.pauseOnLostFocus = false;
-                Config.CULLING_ENABLED.set(true);
-                Config.CULLING_BLOCK_LEVEL.set(true);
-                Config.CULLING_SECTION_APPROXIMATION.set(false);
-                Config.CULLING_SHAPE_ENABLED.set(false);
-                Config.CULLING_SIGHTLINE_ENABLED.set(false);
-                Config.CULLING_VOLUME.set(false);
-                BlockCuller.invalidate();
-                SectionCuller.invalidate();
-                runServerCommand(minecraft, "gamemode creative @s");
-                runServerCommand(minecraft, "tp @s 290 ~ 290 0 0");
                 autoPhase = 1;
-                autoPhaseTick = autoTicks;
-                ModularPerspective.LOGGER.info("[auto] M6 phase0: setup at section boundary");
+                autoTicks = 0;
+                ModularPerspective.LOGGER.info("[auto] M6 phase0: setup at {}", minecraft.player.blockPosition());
             }
             case 1 -> {
-                if (autoTicks - autoPhaseTick >= 20) {
-                    BlockPos base = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, base);
-                    int built = buildWall(minecraft, base, 10, 16, 2);
-                    autoPhase = 2;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M6 phase1: wall built ({} blocks) at {}", built, base);
+                if (autoTicks < 10) {
+                    return;
                 }
+                m6Base = minecraft.player.blockPosition();
+                int count = buildRoom(minecraft, m6Base);
+                RoomScanner.get().invalidate();
+                autoPhase = 2;
+                autoTicks = 0;
+                ModularPerspective.LOGGER.info("[auto] M6 phase1: room built ({} blocks)", count);
             }
             case 2 -> {
-                if (autoTicks - autoPhaseTick >= 20) {
-                    grabScreenshot(minecraft, "m6-block-culled.png");
-                    ModularPerspective.LOGGER.info(
-                            "[auto] M6 block-culled: culling={} blocks={} rays={} dirty={} section={}",
-                            BlockCuller.isCulling(), BlockCuller.culledCount(), BlockCuller.raysCast(),
-                            BlockCuller.dirtyPending(), SectionCuller.hiddenCount());
-                    Config.CULLING_ENABLED.set(false);
-                    BlockCuller.invalidate();
-                    SectionCuller.invalidate();
-                    autoPhase = 3;
-                    autoPhaseTick = autoTicks;
+                if (autoTicks < 30) {
+                    return;
                 }
+                ModularPerspective.LOGGER.info("[auto] diag: cullingEnabled={} topDown={} terrainEnabled={} idle={}", Config.CULLING_ENABLED.get(), ClientPerspective.isTopDown(), TerrainCulling.isEnabled(), TerrainCulling.idle());
+                ModularPerspective.LOGGER.info("[auto] diag room last={} sightline last={}", RoomScanner.get().lastResult(), SightlineScanner.get().lastResult());
+                ModularPerspective.LOGGER.info("[auto] M6 room-indoor: type={} columns={} roof={} wall={} doors={}",
+                        RoomScanner.get().type(), RoomScanner.get().columnCount(), RoomScanner.get().roofColumnCount(),
+                        RoomScanner.get().wallColumnCount(), RoomScanner.get().doorwayCount());
+                grabScreenshot(minecraft, "m6-room-indoor.png");
+                clearSceneArea(minecraft, m6Base);
+                RoomScanner.get().invalidate();
+                autoPhase = 3;
+                autoTicks = 0;
             }
             case 3 -> {
-                if (autoTicks - autoPhaseTick >= 20) {
-                    grabScreenshot(minecraft, "m6-block-off.png");
-                    ModularPerspective.LOGGER.info("[auto] M6 block-off: culling={} blocks={} rays={} section={}",
-                            BlockCuller.isCulling(), BlockCuller.culledCount(), BlockCuller.raysCast(),
-                            SectionCuller.hiddenCount());
-                    Config.CULLING_ENABLED.set(true);
-                    BlockCuller.invalidate();
-                    BlockPos base = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, base);
-                    int room = buildRoom(minecraft, base);
-                    RoomScanner.get().invalidate();
-                    autoPhase = 4;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M6 phase3: room built ({} blocks)", room);
+                if (autoTicks < 30) {
+                    return;
                 }
+                ModularPerspective.LOGGER.info("[auto] M6 room-outdoor: type={} roof={}",
+                        RoomScanner.get().type(), RoomScanner.get().roofColumnCount());
+                grabScreenshot(minecraft, "m6-room-outdoor.png");
+                int count = buildSightlineWall(minecraft, m6Base, false);
+                SightlineScanner.get().invalidate();
+                autoPhase = 4;
+                autoTicks = 0;
+                ModularPerspective.LOGGER.info("[auto] M6 phase3: sightline wall built ({} blocks)", count);
             }
             case 4 -> {
-                if (autoTicks - autoPhaseTick >= 25) {
-                    RoomScanner.get().invalidate();
-                    grabScreenshot(minecraft, "m6-room-indoor.png");
-                    ModularPerspective.LOGGER.info("[auto] M6 room-indoor: type={} air={} shell={} culling={} blocks={}",
-                            RoomScanner.get().type(), RoomScanner.get().airCount(), RoomScanner.get().shellCount(),
-                            BlockCuller.isCulling(), BlockCuller.culledCount());
-                    clearSceneArea(minecraft, minecraft.player.blockPosition());
-                    RoomScanner.get().invalidate();
-                    autoPhase = 5;
-                    autoPhaseTick = autoTicks;
+                if (autoTicks < 30) {
+                    return;
                 }
+                ModularPerspective.LOGGER.info(
+                        "[auto] M6 sightline-solid: shapes={} culled={} prot={} incomplete={} rays={} scan={}us",
+                        SightlineScanner.get().shapeCount(), SightlineScanner.get().culledCount(),
+                        SightlineScanner.get().protectedCount(), SightlineScanner.get().incompleteShapes(),
+                        SightlineScanner.get().arrivedRays(), SightlineScanner.get().lastScanMicros());
+                grabScreenshot(minecraft, "m6-sightline-solid.png");
+                clearSceneArea(minecraft, m6Base);
+                SightlineScanner.get().invalidate();
+                int count = buildSightlineWall(minecraft, m6Base, true);
+                autoPhase = 5;
+                autoTicks = 0;
+                ModularPerspective.LOGGER.info("[auto] M6 phase4: arch built ({} blocks)", count);
             }
             case 5 -> {
-                if (autoTicks - autoPhaseTick >= 25) {
-                    RoomScanner.get().invalidate();
-                    grabScreenshot(minecraft, "m6-room-outdoor.png");
-                    ModularPerspective.LOGGER.info("[auto] M6 room-outdoor: type={} air={} shell={} culling={} blocks={}",
-                            RoomScanner.get().type(), RoomScanner.get().airCount(), RoomScanner.get().shellCount(),
-                            BlockCuller.isCulling(), BlockCuller.culledCount());
-                    Config.CULLING_BLOCK_LEVEL.set(false);
-                    Config.CULLING_SECTION_APPROXIMATION.set(false);
-                    Config.CULLING_SHAPE_ENABLED.set(true);
-                    BlockCuller.invalidate();
-                    SectionCuller.invalidate();
-                    BlockPos shapeBase = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, shapeBase);
-                    int shapeWall = buildShapeWall(minecraft, shapeBase);
-                    autoPhase = 6;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M6 phase5: shape wall built ({} blocks)", shapeWall);
+                if (autoTicks < 30) {
+                    return;
                 }
-            }
-            case 6 -> {
-                if (autoTicks - autoPhaseTick >= 25) {
-                    grabScreenshot(minecraft, "m6-shape-culled.png");
-                    ModularPerspective.LOGGER.info("[auto] M6 shape-culled: culling={} shapeBlocks={} rays={} section={}",
-                            BlockCuller.isCulling(), BlockCuller.shapeBlocks(), BlockCuller.raysCast(),
-                            SectionCuller.hiddenCount());
-                    Config.CULLING_SHAPE_ENABLED.set(false);
-                    BlockCuller.invalidate();
-                    SectionCuller.invalidate();
-                    autoPhase = 7;
-                    autoPhaseTick = autoTicks;
-                }
-            }
-            case 7 -> {
-                if (autoTicks - autoPhaseTick >= 20) {
-                    grabScreenshot(minecraft, "m6-shape-off.png");
-                    ModularPerspective.LOGGER.info("[auto] M6 shape-off: culling={} shapeBlocks={} blocks={}",
-                            BlockCuller.isCulling(), BlockCuller.shapeBlocks(), BlockCuller.culledCount());
-                    Config.CULLING_BLOCK_LEVEL.set(false);
-                    Config.CULLING_SECTION_APPROXIMATION.set(false);
-                    Config.CULLING_SHAPE_ENABLED.set(false);
-                    Config.CULLING_SIGHTLINE_ENABLED.set(true);
-                    BlockCuller.invalidate();
-                    SectionCuller.invalidate();
-                    SightlineScanner.get().reset();
-                    SightlineScanner.get().invalidate();
-                    BlockPos sightlineBase = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, sightlineBase);
-                    int solidWall = buildSightlineWall(minecraft, sightlineBase, false);
-                    autoPhase = 8;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M6 phase7: sightline solid wall built ({} blocks)",
-                            solidWall);
-                }
-            }
-            case 8 -> {
-                if (autoTicks - autoPhaseTick >= 25) {
-                    grabScreenshot(minecraft, "m6-sightline-solid.png");
-                    ModularPerspective.LOGGER.info(
-                            "[auto] M6 sightline-solid: culling={} shapes={} culled={} prot={} incomplete={} rays={} scan={}us",
-                            SightlineScanner.get().isCulling(), SightlineScanner.get().shapeCount(),
-                            SightlineScanner.get().culledCount(), SightlineScanner.get().protectedCount(),
-                            SightlineScanner.get().incompleteShapes(), SightlineScanner.get().arrivedRays(),
-                            SightlineScanner.get().lastScanMicros());
-                    ModularPerspective.LOGGER.info(
-                            "[auto] M6 config: enabled={} block={} shape={} sightline={} volume={} topDown={}",
-                            Config.CULLING_ENABLED.get(), Config.CULLING_BLOCK_LEVEL.get(),
-                            Config.CULLING_SHAPE_ENABLED.get(), Config.CULLING_SIGHTLINE_ENABLED.get(),
-                            Config.CULLING_VOLUME.get(), ClientPerspective.isTopDown());
-                    BlockPos archBase = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, archBase);
-                    int archBlocks = buildSightlineWall(minecraft, archBase, true);
-                    SightlineScanner.get().invalidate();
-                    autoPhase = 9;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M6 phase8: sightline arch built ({} blocks)", archBlocks);
-                }
-            }
-            case 9 -> {
-                if (autoTicks - autoPhaseTick >= 25) {
-                    grabScreenshot(minecraft, "m6-sightline-arch.png");
-                    ModularPerspective.LOGGER.info(
-                            "[auto] M6 sightline-arch: culling={} shapes={} culled={} prot={} rays={}",
-                            SightlineScanner.get().isCulling(), SightlineScanner.get().shapeCount(),
-                            SightlineScanner.get().culledCount(), SightlineScanner.get().protectedCount(),
-                            SightlineScanner.get().arrivedRays());
-                    Config.CULLING_SIGHTLINE_ENABLED.set(false);
-                    SightlineScanner.get().reset();
-                    BlockPos hallBase = minecraft.player.blockPosition();
-                    clearSceneArea(minecraft, hallBase);
-                    int hallBlocks = buildDoorwayHall(minecraft, hallBase);
-                    RoomScanner.get().invalidate();
-                    autoPhase = 10;
-                    autoPhaseTick = autoTicks;
-                    ModularPerspective.LOGGER.info("[auto] M6 phase9: doorway hall built ({} blocks)", hallBlocks);
-                }
-            }
-            case 10 -> {
-                if (autoTicks - autoPhaseTick >= 45) {
-                    grabScreenshot(minecraft, "m6-room-doorway.png");
-                    ModularPerspective.LOGGER.info(
-                            "[auto] M6 room-doorway: type={} columns={} doors={} roof={} wall={}",
-                            RoomScanner.get().type(), RoomScanner.get().columnCount(),
-                            RoomScanner.get().doorwayCount(), RoomScanner.get().roofColumnCount(),
-                            RoomScanner.get().wallColumnCount());
-                    Config.CULLING_BLOCK_LEVEL.set(true);
-                    Config.CULLING_SECTION_APPROXIMATION.set(true);
-                    Config.CULLING_SHAPE_ENABLED.set(true);
-                    Config.CULLING_SIGHTLINE_ENABLED.set(true);
-                    BlockCuller.invalidate();
-                    SectionCuller.invalidate();
-                    SightlineScanner.get().reset();
-                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
-                    autoPhase = 11;
-                    ModularPerspective.LOGGER.info("[auto] M6 verification finished");
-                }
+                ModularPerspective.LOGGER.info("[auto] M6 sightline-arch: shapes={} culled={} rays={}",
+                        SightlineScanner.get().shapeCount(), SightlineScanner.get().culledCount(),
+                        SightlineScanner.get().arrivedRays());
+                grabScreenshot(minecraft, "m6-sightline-arch.png");
+                clearSceneArea(minecraft, m6Base);
+                SightlineScanner.get().invalidate();
+                autoPhase = 6;
+                autoTicks = 0;
             }
             default -> {
-
-
-                // 完成：不再动作。
+                ModularPerspective.LOGGER.info("[auto] M6 verification finished");
+                autoModeM6 = false;
+                autoPhase = 0;
+                autoTicks = 0;
             }
         }
     }
 
     /** 截图并输出 M5 场景统计（hidden/rays/扫描耗时/过滤耗时）。 */
-    private static void screenshotAndLog(Minecraft minecraft, String file, String label) {
-        grabScreenshot(minecraft, file);
-        ModularPerspective.LOGGER.info("[auto] M5 {}: culling={} hidden={} rays={} scan={}us/{}us filter={}us/{}us",
-                label, SectionCuller.isCulling(), SectionCuller.hiddenCount(), SectionCuller.raysCast(),
-                SectionCuller.lastScanMicros(), SectionCuller.maxScanMicros(),
-                SectionCuller.lastFilterMicros(), SectionCuller.maxFilterMicros());
-    }
 
     /**
      * 退出后检查 playerdata 里的 attachment 是否落盘。
@@ -929,7 +710,8 @@ public final class ModularPerspectiveClient {
                     }
                 }
                 minecraft.level.setBlock(base.offset(dx, 3, dz), Blocks.STONE.defaultBlockState(), 3);
-                count++;
+                minecraft.level.setBlock(base.offset(dx, -1, dz), Blocks.STONE.defaultBlockState(), 3);
+                count += 2;
             }
         }
         return count;
@@ -942,38 +724,8 @@ public final class ModularPerspectiveClient {
      *
      * @return 放置的方块数
      */
-    private static int buildWall(Minecraft minecraft, BlockPos base, int halfWidth, int height, int depth) {
-        if (minecraft.level == null) {
-            return 0;
-        }
-        int count = 0;
-        for (int dx = -halfWidth; dx <= halfWidth; dx++) {
-            for (int dy = 0; dy < height; dy++) {
-                for (int dz = -4; dz < -4 + depth; dz++) {
-                    minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
-                    count++;
-                }
-            }
-        }
-        return count;
-    }
 
     /** 在玩家头顶（dy 2..6）与相机之间搭 9×5×2 石墙（仅客户端方块），用于 SHAPE tier 验收。 */
-    private static int buildShapeWall(Minecraft minecraft, BlockPos base) {
-        if (minecraft.level == null) {
-            return 0;
-        }
-        int count = 0;
-        for (int dx = -4; dx <= 4; dx++) {
-            for (int dy = 2; dy <= 6; dy++) {
-                for (int dz = -4; dz <= -3; dz++) {
-                    minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
-                    count++;
-                }
-            }
-        }
-        return count;
-    }
 
     /**
      * 在相机与玩家之间搭 9×6×2 石墙（仅客户端方块），用于 SIGHTLINE tier 验收。
@@ -1010,36 +762,6 @@ public final class ModularPerspectiveClient {
      *
      * @return 放置的方块数
      */
-    private static int buildDoorwayHall(Minecraft minecraft, BlockPos base) {
-        if (minecraft.level == null) {
-            return 0;
-        }
-        int count = 0;
-        for (int dx = -4; dx <= 4; dx++) {
-            for (int dz = -2; dz <= 2; dz++) {
-                boolean perimeter = Math.abs(dx) == 4 || Math.abs(dz) == 2;
-                if (perimeter) {
-                    for (int dy = 0; dy <= 2; dy++) {
-                        minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
-                        count++;
-                    }
-                }
-                minecraft.level.setBlock(base.offset(dx, 3, dz), Blocks.STONE.defaultBlockState(), 3);
-                count++;
-            }
-        }
-        for (int dz = -2; dz <= 2; dz++) {
-            for (int dy = 0; dy <= 2; dy++) {
-                boolean doorway = dz >= -1 && dz <= 0 && dy >= 1 && dy <= 2;
-                if (doorway) {
-                    continue;
-                }
-                minecraft.level.setBlock(base.offset(1, dy, dz), Blocks.STONE.defaultBlockState(), 3);
-                count++;
-            }
-        }
-        return count;
-    }
 
     /** 以 OP 权限在集成服务器上执行命令（仅开发期自动验收用；权限 4 绕过单人作弊开关）。 */
     private static void runServerCommand(Minecraft minecraft, String command) {

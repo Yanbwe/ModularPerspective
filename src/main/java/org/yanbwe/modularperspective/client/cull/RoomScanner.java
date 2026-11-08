@@ -83,7 +83,7 @@ public final class RoomScanner {
     /** Flood visit budget per scan. */
     private static final int MAX_FLOOD_VISITS = 16000;
     /** 单次扫描硬预算；超时保留旧快照并等下一轮（原模组 worker/预算的近似）。 */
-    private static final long SCAN_BUDGET_NANOS = 3_000_000L;
+    private static final long SCAN_BUDGET_NANOS = 8_000_000L;
     /** How far above the head we look for a ceiling before running the full flood. */
     private static final int CEILING_PROBE = 8;
     /** Cull-span expansion cap for ghost rendering / debug dumps. */
@@ -281,6 +281,15 @@ public final class RoomScanner {
     }
 
     /** Whether the block belongs to the room cover (cull), is above it (keep) or neither. */
+    /** 是否已有可用的扫描结果（TerrainCulling.idle() 热路径用）。 */
+    public boolean isActive() {
+        return snapshot != null;
+    }
+
+    /** 整数坐标版本，避免网格热路径分配 BlockPos。 */
+    public int test(int x, int y, int z) {
+        return test(new BlockPos(x, y, z));
+    }
     public int test(BlockPos pos) {
         Snapshot snap = this.snapshot;
         if (snap == null) {
