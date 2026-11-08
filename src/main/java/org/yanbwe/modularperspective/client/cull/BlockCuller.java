@@ -9,6 +9,13 @@ import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.SectionPos;
 import net.minecraft.world.level.Level;
+import net.minecraft.util.Mth;
+import net.minecraft.world.level.block.DoorBlock;
+import net.minecraft.world.level.block.LadderBlock;
+import net.minecraft.world.level.block.SpawnerBlock;
+import net.minecraft.world.level.block.TrialSpawnerBlock;
+import net.minecraft.world.level.block.VaultBlock;
+import net.minecraft.world.level.block.FaceAttachedHorizontalDirectionalBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -40,6 +47,8 @@ public final class BlockCuller {
     private static final int MAX_CULLED_BLOCKS = 8192;
     /** 每次重算最多把多少个 section 标脏，避免一帧触发大量重建。 */
     private static final int MAX_DIRTY_PER_TICK = 16;
+    /** v0.3 SHAPE tier 首片：每轮最多剔除多少方块（防止新 tier 把整屏挖空）。 */
+    private static final int MAX_CONE_BLOCKS = 4096;
 
     private static final LongOpenHashSet CULLED = new LongOpenHashSet();
     private static final LongOpenHashSet NEXT_CULLED = new LongOpenHashSet();
@@ -53,6 +62,8 @@ public final class BlockCuller {
     private static Vec3 lastPlayerPos = Vec3.ZERO;
     private static long lastPlayerSection = Long.MIN_VALUE;
     private static int dirtyPending;
+    /** 最近一轮 SHAPE tier 剔除的方块数（调试 HUD/自动验收用）。 */
+    private static int shapeBlocks;
 
     private BlockCuller() {
     }
@@ -73,6 +84,11 @@ public final class BlockCuller {
         return dirtyPending;
     }
 
+    /** 最近一轮 SHAPE tier 剔除的方块数。 */
+    public static int shapeBlocks() {
+        return shapeBlocks;
+    }
+
     /** 渲染期查询：某个方块是否应从区块 mesh 中剔除。 */
     public static boolean isCulled(BlockPos blockPos) {
         return culling && !CULLED.isEmpty() && CULLED.contains(blockPos.asLong());
@@ -91,8 +107,11 @@ public final class BlockCuller {
     /** 每客户端 tick 调用（在相机状态更新之后）。 */
     public static void tick(Minecraft minecraft) {
         Level level = minecraft.level;
-        boolean enabled = Config.CULLING_ENABLED.get() && Config.CULLING_BLOCK_LEVEL.get();
-        if (!enabled || level == null || minecraft.player == null || !ClientPerspective.isTopDown()) {
+        boolean master = Config.CULLING_ENABLED.get();
+        boolean rayEnabled = master && Config.CULLING_BLOCK_LEVEL.get();
+        boolean shapeEnabled = master && Config.CULLING_SHAPE_ENABLED.get() && !RoomScanner.get().isIndoor();
+        if ((!rayEnabled && !shapeEnabled) || level == null || minecraft.player == null
+                || !ClientPerspective.isTopDown()) {
             disable(level);
             return;
         }
@@ -118,6 +137,7 @@ public final class BlockCuller {
 
         NEXT_CULLED.clear();
         int rays = 0;
+        int shape = 0;
         int minY = minecraft.player.blockPosition().getY();
         AABB box = minecraft.player.getBoundingBox();
         Vec3 center = box.getCenter();
@@ -132,12 +152,17 @@ public final class BlockCuller {
                 new Vec3(box.maxX, box.maxY, box.maxZ),
                 center
         };
-        for (Vec3 target : targets) {
-            if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
-                break;
+        if (rayEnabled) {
+            for (Vec3 target : targets) {
+                if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS) {
+                    break;
+                }
+                rays++;
+                carveRay(level, camera, target, minY, RoomScanner.get().isIndoor() ? Long.MIN_VALUE : playerSection);
             }
-            rays++;
-            carveRay(level, camera, target, minY, RoomScanner.get().isIndoor() ? Long.MIN_VALUE : playerSection);
+        }
+        if (shapeEnabled) {
+            shape = carveCone(level, playerPos, camera, RoomScanner.get().isIndoor(), minY);
         }
 
         // 只把“状态变化”的方块所在 section 标脏：静止时不会反复重建。
@@ -146,6 +171,7 @@ public final class BlockCuller {
         CULLED.addAll(NEXT_CULLED);
         culledCount = CULLED.size();
         raysCast = rays;
+        shapeBlocks = shape;
         culling = true;
         flushDirty(level);
     }
@@ -160,6 +186,7 @@ public final class BlockCuller {
         CULLED.clear();
         culledCount = 0;
         raysCast = 0;
+        shapeBlocks = 0;
         culling = false;
         if (level != null) {
             flushDirty(level);
@@ -305,6 +332,64 @@ public final class BlockCuller {
             }
         }
     }
+    /**
+     * v0.3 SHAPE tier 首片（旧模组 {@code GenericCuller3} 的锥/柱近似，docs/design.md §11.2）：
+     * 遍历玩家脚部与相机构成的包围盒，把落在“相机→玩家轴线”锥/柱范围内的实心方块加入剔除集。
+     * 圆柱半径、锥形半角来自 {@code culling.shapeRadius/shapeConeHalfAngle}；室内由房间扫描负责，不启用本 tier。
+     *
+     * @return 本轮新剔除的方块数
+     */
+    private static int carveCone(Level level, Vec3 feet, Vec3 camera, boolean roomIndoor, int minY) {
+        double radius = Config.CULLING_SHAPE_RADIUS.get();
+        double coneHalfAngle = Config.CULLING_SHAPE_CONE_HALF_ANGLE.get();
+        int minX = Mth.floor(Math.min(feet.x, camera.x) - radius - 1.0D);
+        int maxX = Mth.floor(Math.max(feet.x, camera.x) + radius + 1.0D);
+        int minBound = Mth.floor(Math.min(feet.y, camera.y) - radius - 1.0D);
+        int maxY = Mth.floor(Math.max(feet.y, camera.y) + radius + 1.0D);
+        int minZ = Mth.floor(Math.min(feet.z, camera.z) - radius - 1.0D);
+        int maxZ = Mth.floor(Math.max(feet.z, camera.z) + radius + 1.0D);
+        BlockPos.MutableBlockPos probe = new BlockPos.MutableBlockPos();
+        int carved = 0;
+        for (int x = minX; x <= maxX; x++) {
+            for (int z = minZ; z <= maxZ; z++) {
+                for (int y = Math.max(minBound, level.getMinBuildHeight()); y <= maxY; y++) {
+                    if (NEXT_CULLED.size() >= MAX_CULLED_BLOCKS || carved >= MAX_CONE_BLOCKS) {
+                        return carved;
+                    }
+                    if (y < minY) {
+                        continue;
+                    }
+                    if (!ShapeCuller.shouldCull(x + 0.5D, y + 0.5D, z + 0.5D, feet.x, feet.y, feet.z,
+                            camera.x, camera.y, camera.z, radius, coneHalfAngle)) {
+                        continue;
+                    }
+                    probe.set(x, y, z);
+                    BlockState state = level.getBlockState(probe);
+                    if (!state.isSolidRender(level, probe) || isIgnoredType(state)) {
+                        continue;
+                    }
+                    if (!roomIndoor && RoomScanner.get().test(new BlockPos(x, y, z)) == RoomScanner.KEEP) {
+                        continue;
+                    }
+                    if (NEXT_CULLED.add(probe.asLong())) {
+                        carved++;
+                    }
+                }
+            }
+        }
+        return carved;
+    }
+
+    /** 门/梯子/墙上装饰/刷怪箱/宝库不参与形状剔除（旧模组 GenericCuller3 的 isIgnoredType），避免挖出怪洞。 */
+    private static boolean isIgnoredType(BlockState state) {
+        return state.getBlock() instanceof DoorBlock
+                || state.getBlock() instanceof LadderBlock
+                || state.getBlock() instanceof FaceAttachedHorizontalDirectionalBlock
+                || state.getBlock() instanceof VaultBlock
+                || state.getBlock() instanceof SpawnerBlock
+                || state.getBlock() instanceof TrialSpawnerBlock;
+    }
+
     /** 对比 CULLED 与 NEXT_CULLED，把状态变化的方块所在 section 加入待重建队列。 */
     private static void markChangedSections() {
         for (LongIterator it = CULLED.iterator(); it.hasNext(); ) {

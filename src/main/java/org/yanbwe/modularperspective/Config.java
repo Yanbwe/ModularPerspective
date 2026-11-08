@@ -26,6 +26,9 @@ public final class Config {
     public static final ModConfigSpec.BooleanValue CULLING_BLOCK_LEVEL;
     public static final ModConfigSpec.BooleanValue CULLING_GHOST;
     public static final ModConfigSpec.BooleanValue CULLING_GHOST_FILL;
+    public static final ModConfigSpec.BooleanValue CULLING_SHAPE_ENABLED;
+    public static final ModConfigSpec.DoubleValue CULLING_SHAPE_RADIUS;
+    public static final ModConfigSpec.DoubleValue CULLING_SHAPE_CONE_HALF_ANGLE;
     public static final ModConfigSpec.BooleanValue DEBUG_OVERLAY;
 
     static {
@@ -43,6 +46,15 @@ public final class Config {
         CULLING_GHOST_FILL = COMMON_BUILDER
                 .comment("v0.3 幽灵方块填充：在半透明线框之外再给被剔除方块画一层半透明青色体积（debugQuads，按面剔除内部面），可在 culling.ghostFill 关闭")
                 .define("ghostFill", true);
+        CULLING_SHAPE_ENABLED = COMMON_BUILDER
+                .comment("v0.3 形状/视线剔除首片（旧模组 GenericCuller3 的锥/柱近似）：把相机与玩家之间的实心地形从区块 mesh 剔除；室内由房间扫描负责，可与 blockLevel 独立开关")
+                .define("shape", true);
+        CULLING_SHAPE_RADIUS = COMMON_BUILDER
+                .comment("形状剔除圆柱半径（格，对应旧模组 cullAngle 默认 6.0）")
+                .defineInRange("shapeRadius", 6.0D, 0.0D, 32.0D);
+        CULLING_SHAPE_CONE_HALF_ANGLE = COMMON_BUILDER
+                .comment("近玩家处锥形半角（度，对应旧模组 coneHalfAngle 默认 45）")
+                .defineInRange("shapeConeHalfAngle", 45.0D, 0.0D, 89.0D);
         COMMON_BUILDER.pop();
 
         COMMON_BUILDER.comment("调试输出").push("debug");

@@ -684,8 +684,44 @@ public final class ModularPerspectiveClient {
                     ModularPerspective.LOGGER.info("[auto] M6 room-outdoor: type={} air={} shell={} culling={} blocks={}",
                             RoomScanner.get().type(), RoomScanner.get().airCount(), RoomScanner.get().shellCount(),
                             BlockCuller.isCulling(), BlockCuller.culledCount());
-                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
+                    Config.CULLING_BLOCK_LEVEL.set(false);
+                    Config.CULLING_SECTION_APPROXIMATION.set(false);
+                    Config.CULLING_SHAPE_ENABLED.set(true);
+                    BlockCuller.invalidate();
+                    SectionCuller.invalidate();
+                    BlockPos shapeBase = minecraft.player.blockPosition();
+                    clearSceneArea(minecraft, shapeBase);
+                    int shapeWall = buildShapeWall(minecraft, shapeBase);
                     autoPhase = 6;
+                    autoPhaseTick = autoTicks;
+                    ModularPerspective.LOGGER.info("[auto] M6 phase5: shape wall built ({} blocks)", shapeWall);
+                }
+            }
+            case 6 -> {
+                if (autoTicks - autoPhaseTick >= 25) {
+                    grabScreenshot(minecraft, "m6-shape-culled.png");
+                    ModularPerspective.LOGGER.info("[auto] M6 shape-culled: culling={} shapeBlocks={} rays={} section={}",
+                            BlockCuller.isCulling(), BlockCuller.shapeBlocks(), BlockCuller.raysCast(),
+                            SectionCuller.hiddenCount());
+                    Config.CULLING_SHAPE_ENABLED.set(false);
+                    BlockCuller.invalidate();
+                    SectionCuller.invalidate();
+                    autoPhase = 7;
+                    autoPhaseTick = autoTicks;
+                }
+            }
+            case 7 -> {
+                if (autoTicks - autoPhaseTick >= 20) {
+                    grabScreenshot(minecraft, "m6-shape-off.png");
+                    ModularPerspective.LOGGER.info("[auto] M6 shape-off: culling={} shapeBlocks={} blocks={}",
+                            BlockCuller.isCulling(), BlockCuller.shapeBlocks(), BlockCuller.culledCount());
+                    Config.CULLING_BLOCK_LEVEL.set(true);
+                    Config.CULLING_SECTION_APPROXIMATION.set(true);
+                    Config.CULLING_SHAPE_ENABLED.set(true);
+                    BlockCuller.invalidate();
+                    SectionCuller.invalidate();
+                    minecraft.options.pauseOnLostFocus = autoSavedPauseOnLostFocus;
+                    autoPhase = 8;
                     ModularPerspective.LOGGER.info("[auto] M6 verification finished");
                 }
             }
@@ -788,6 +824,23 @@ public final class ModularPerspectiveClient {
         for (int dx = -halfWidth; dx <= halfWidth; dx++) {
             for (int dy = 0; dy < height; dy++) {
                 for (int dz = -4; dz < -4 + depth; dz++) {
+                    minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    /** 在玩家头顶（dy 2..6）与相机之间搭 9×5×2 石墙（仅客户端方块），用于 SHAPE tier 验收。 */
+    private static int buildShapeWall(Minecraft minecraft, BlockPos base) {
+        if (minecraft.level == null) {
+            return 0;
+        }
+        int count = 0;
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dy = 2; dy <= 6; dy++) {
+                for (int dz = -4; dz <= -3; dz++) {
                     minecraft.level.setBlock(base.offset(dx, dy, dz), Blocks.STONE.defaultBlockState(), 3);
                     count++;
                 }
